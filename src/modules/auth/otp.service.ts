@@ -179,11 +179,11 @@ export class OtpService {
 
     // Verify OTP
     if (otpRecord.otp !== otpCode) {
-      // Increment attempt count
+      // Increment atomically so concurrent wrong guesses cannot share one attempt
       await this.prisma.phoneOtp.update({
         where: { id: otpRecord.id },
         data: {
-          attemptCount: otpRecord.attemptCount + 1,
+          attemptCount: { increment: 1 },
         },
       });
 

@@ -168,7 +168,7 @@ describe('OtpService', () => {
       expect(mockPrismaService.phoneOtp.update).toHaveBeenCalledWith({
         where: { id: 'otp-123' },
         data: {
-          attemptCount: 1,
+          attemptCount: { increment: 1 },
         },
       });
     });
