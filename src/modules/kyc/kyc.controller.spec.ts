@@ -5,6 +5,7 @@ import { KycController } from './kyc.controller';
 import { KycService } from './kyc.service';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { RolesGuard, ROLES_KEY } from '../../common/guards/roles.guard';
+import { ThrottlerGuard } from '@nestjs/throttler';
 
 describe('KycController', () => {
   let controller: KycController;
@@ -80,19 +81,23 @@ describe('KycController', () => {
   });
 
   describe('guard metadata', () => {
+    it.each(['submit', 'review'] as const)('%s is rate limited', (method) => {
+      expect(Reflect.getMetadata(GUARDS_METADATA, KycController.prototype[method])).toContain(ThrottlerGuard);
+    });
+
     it('applies JwtAuthGuard at controller level', () => {
       expect(Reflect.getMetadata(GUARDS_METADATA, KycController)).toEqual([JwtAuthGuard]);
     });
 
     it.each(['submit', 'findMy', 'getMyStatus'] as const)('%s is restricted to INSTRUCTOR', (method) => {
       const handler = KycController.prototype[method];
-      expect(Reflect.getMetadata(GUARDS_METADATA, handler)).toEqual([RolesGuard]);
+      expect(Reflect.getMetadata(GUARDS_METADATA, handler)).toContain(RolesGuard);
       expect(Reflect.getMetadata(ROLES_KEY, handler)).toEqual([UserRole.INSTRUCTOR]);
     });
 
     it.each(['findAll', 'findOne', 'review'] as const)('%s is restricted to ADMIN', (method) => {
       const handler = KycController.prototype[method];
-      expect(Reflect.getMetadata(GUARDS_METADATA, handler)).toEqual([RolesGuard]);
+      expect(Reflect.getMetadata(GUARDS_METADATA, handler)).toContain(RolesGuard);
       expect(Reflect.getMetadata(ROLES_KEY, handler)).toEqual([UserRole.ADMIN]);
     });
   });
