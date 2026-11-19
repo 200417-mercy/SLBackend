@@ -40,7 +40,11 @@ describe('AuditLogController (Issue #408) - Unit Tests for Endpoints', () => {
     it('should return paginated audit logs', async () => {
       mockService.findAll.mockResolvedValue([{ id: 'log1' }, { id: 'log2' }]);
 
+<<<<<<< HEAD
       const result = await controller.findAll({ page: 1, limit: 20 } as QueryAuditLogDto);
+=======
+      const result = await controller.findAll({ page: 1, limit: 20 });
+>>>>>>> cd403ad088bce2fcede247bdbdfd40debb84dc2f
       expect(result).toBeDefined();
       expect(mockService.findAll).toHaveBeenCalledWith({ page: 1, limit: 20 });
     });
@@ -48,18 +52,30 @@ describe('AuditLogController (Issue #408) - Unit Tests for Endpoints', () => {
     it('should return empty list when no logs exist', async () => {
       mockService.findAll.mockResolvedValue([]);
 
+<<<<<<< HEAD
       const result = await controller.findAll({ page: 1, limit: 20 } as QueryAuditLogDto);
+=======
+      const result = await controller.findAll({ page: 1, limit: 20 });
+>>>>>>> cd403ad088bce2fcede247bdbdfd40debb84dc2f
       expect(result).toEqual([]);
     });
   });
 
   describe('AuditLogController.exportCsv', () => {
     it('should export audit logs as CSV', async () => {
+<<<<<<< HEAD
       const csv = 'id,timestamp,action\\nlog1,2026-01-01,create';
       const rowCount = 1;
       mockService.exportAuditLogCsv.mockResolvedValue({ csv, rowCount });
 
       const result = await controller.exportCsv({ page: 1, limit: 20 } as QueryAuditLogDto);
+=======
+      const csv = 'id,timestamp,action\nlog1,2026-01-01,create';
+      const rowCount = 1;
+      mockService.exportAuditLogCsv.mockResolvedValue({ csv, rowCount });
+
+      const result = await controller.exportCsv({ page: 1, limit: 20 });
+>>>>>>> cd403ad088bce2fcede247bdbdfd40debb84dc2f
       expect(result).toEqual({ csv, rowCount });
       expect(mockService.exportAuditLogCsv).toHaveBeenCalledWith({ page: 1, limit: 20 });
     });
@@ -67,7 +83,11 @@ describe('AuditLogController (Issue #408) - Unit Tests for Endpoints', () => {
     it('should return empty CSV when no logs exist', async () => {
       mockService.exportAuditLogCsv.mockResolvedValue({ csv: '', rowCount: 0 });
 
+<<<<<<< HEAD
       const result = await controller.exportCsv({ page: 1, limit: 20 } as QueryAuditLogDto);
+=======
+      const result = await controller.exportCsv({ page: 1, limit: 20 });
+>>>>>>> cd403ad088bce2fcede247bdbdfd40debb84dc2f
       expect(result).toEqual({ csv: '', rowCount: 0 });
     });
   });
