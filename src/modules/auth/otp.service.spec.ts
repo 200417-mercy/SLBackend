@@ -1,5 +1,5 @@
 import { Test, TestingModule } from '@nestjs/testing';
-import { UnauthorizedException } from '@nestjs/common';
+import { BadRequestException, UnauthorizedException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { OtpService, TooManyRequestsException } from './otp.service';
 import { PrismaService } from '../../common/prisma/prisma.service';
@@ -203,6 +203,25 @@ describe('OtpService', () => {
         phoneNumber: '+254712345678',
         phoneVerifiedAt: expect.any(Date),
       });
+    });
+
+    it('should reject an unknown user', async () => {
+      mockPrismaService.user.findUnique.mockResolvedValue(null);
+
+      await expect(service.getVerificationStatus('missing-user')).rejects.toThrow(
+        BadRequestException,
+      );
+    });
+  });
+
+  describe('verifyOtp without a pending code', () => {
+    it('should reject when no unused OTP exists', async () => {
+      mockPrismaService.phoneOtp.findFirst.mockResolvedValue(null);
+
+      await expect(
+        service.verifyOtp('user-123', '+254712345678', '123456'),
+      ).rejects.toThrow(UnauthorizedException);
+      expect(mockPrismaService.user.update).not.toHaveBeenCalled();
     });
   });
 });

@@ -1,4 +1,4 @@
-import { UnauthorizedException } from '@nestjs/common';
+import { ConflictException, UnauthorizedException } from '@nestjs/common';
 import { GoogleAuthService, GoogleIdentity } from './google-auth.service';
 
 describe('GoogleAuthService', () => {
@@ -142,5 +142,29 @@ describe('GoogleAuthService', () => {
       data: expect.objectContaining({ googleId: identity.googleId }),
     });
     expect(prisma.user.create).not.toHaveBeenCalled();
+  });
+
+  it('rejects a login when the Google email is not verified', async () => {
+    const service = buildService();
+
+    await expect(
+      service.login({ ...identity, emailVerified: false }),
+    ).rejects.toBeInstanceOf(UnauthorizedException);
+    expect(prisma.user.findUnique).not.toHaveBeenCalled();
+  });
+
+  it('returns a conflict when the Google account is already linked elsewhere', async () => {
+    prisma.user.findUnique.mockResolvedValue(null);
+    prisma.user.create.mockRejectedValueOnce({ code: 'P2002' });
+    const service = buildService();
+
+    await expect(service.login(identity)).rejects.toBeInstanceOf(ConflictException);
+    expect(refreshTokens.issueTokenPair).not.toHaveBeenCalled();
+  });
+
+  it('refuses to start without Google client credentials', () => {
+    config.get.mockReturnValue(undefined);
+
+    expect(() => buildService()).toThrow('GOOGLE_CLIENT_ID');
   });
 });

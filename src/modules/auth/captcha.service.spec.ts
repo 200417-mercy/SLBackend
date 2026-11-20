@@ -190,4 +190,21 @@ describe('CaptchaService', () => {
       UnauthorizedException,
     );
   });
+
+  it('fails closed when the provider returns an unexpected payload', async () => {
+    mockedAxios.post.mockResolvedValue({ status: 200, data: {} });
+
+    await expect(service.verifyBeforeNonce('token', '12.12.12.12')).rejects.toBeInstanceOf(
+      ServiceUnavailableException,
+    );
+  });
+
+  it('omits remoteip when the client IP is unknown', async () => {
+    mockedAxios.post.mockResolvedValue({ status: 200, data: { success: true } });
+
+    await expect(service.verifyBeforeNonce('token', '')).resolves.toBeUndefined();
+
+    const body = mockedAxios.post.mock.calls[0][1] as string;
+    expect(body).not.toContain('remoteip');
+  });
 });
