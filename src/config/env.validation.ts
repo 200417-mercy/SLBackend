@@ -13,6 +13,7 @@ import {
   MinLength,
   validateSync,
 } from 'class-validator';
+import { IsStellarAddress } from '../common/validators/stellar-address.validator';
 
 export enum NodeEnv {
   Development = 'development',
@@ -160,13 +161,13 @@ export class EnvironmentVariables {
   USDC_TOKEN_ADDRESS?: string;
 
   @IsDefined()
-  @Matches(/^G[1-9A-HJ-NP-Za-km-z]{55}$/, {
+  @IsStellarAddress({
     message: 'ADMIN_STELLAR_ADDRESS must be a valid Stellar public key (starts with G, 56 chars)',
   })
   ADMIN_STELLAR_ADDRESS: string;
 
   @IsDefined()
-  @Matches(/^G[1-9A-HJ-NP-Za-km-z]{55}$/, {
+  @IsStellarAddress({
     message: 'TREASURY_STELLAR_ADDRESS must be a valid Stellar public key (starts with G, 56 chars)',
   })
   TREASURY_STELLAR_ADDRESS: string;
