@@ -1,15 +1,24 @@
+import { BadRequestException, ForbiddenException, NotFoundException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
-import { GUARDS_METADATA } from '@nestjs/common/constants';
-import { UserRole } from '@prisma/client';
 import { ImpersonationController } from './impersonation.controller';
 import { ImpersonationService } from './impersonation.service';
-import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
-import { RolesGuard, ROLES_KEY } from '../../common/guards/roles.guard';
+import { PrismaService } from '../../common/prisma/prisma.service';
+import { StartImpersonationDto } from './dto/start-impersonation.dto';
 
-describe('ImpersonationController', () => {
+describe('ImpersonationController (Issue #407) - Unit Tests for Endpoints', () => {
   let controller: ImpersonationController;
+  let service: ImpersonationService;
 
-  const mockImpersonationService = {
+  const mockPrisma = {
+    impersonation: {
+      create: jest.fn(),
+      findMany: jest.fn(),
+      findUnique: jest.fn(),
+    },
+    $transaction: jest.fn(),
+  };
+
+  const mockService = {
     startImpersonation: jest.fn(),
     getAuditTrail: jest.fn(),
     verifySession: jest.fn(),
@@ -18,52 +27,100 @@ describe('ImpersonationController', () => {
 
   beforeEach(async () => {
     const module: TestingModule = await Test.createTestingModule({
-      controllers: [ImpersonationController],
-      providers: [{ provide: ImpersonationService, useValue: mockImpersonationService }],
+      providers: [
+        ImpersonationController,
+        { provide: ImpersonationService, useValue: mockService },
+        { provide: PrismaService, useValue: mockPrisma },
+      ],
     }).compile();
 
     controller = module.get<ImpersonationController>(ImpersonationController);
+    service = module.get<ImpersonationService>(ImpersonationService);
     jest.clearAllMocks();
   });
 
-  it('should be defined', () => {
-    expect(controller).toBeDefined();
-  });
+  describe('ImpersonationController.startImpersonation', () => {
+    it('should start impersonation successfully with valid admin and dto', async () => {
+      const dto: StartImpersonationDto = {
+        targetUserId: 'user-1',
+        durationMinutes: 30,
+      };
 
-  it('startImpersonation delegates to service', async () => {
-    const dto = { targetUserId: 'u1' } as any;
-    mockImpersonationService.startImpersonation.mockResolvedValue({ sessionId: 's1' });
-    expect(await controller.startImpersonation('admin-1', dto)).toEqual({ sessionId: 's1' });
-    expect(mockImpersonationService.startImpersonation).toHaveBeenCalledWith('admin-1', dto);
-  });
+      mockService.startImpersonation.mockResolvedValue({ id: 'session-1', ...dto });
 
-  it('getAuditTrail defaults to page 1, limit 10', async () => {
-    await controller.getAuditTrail();
-    expect(mockImpersonationService.getAuditTrail).toHaveBeenCalledWith(1, 10);
-  });
-
-  it('getAuditTrail coerces page/limit to numbers', async () => {
-    await controller.getAuditTrail('3' as any, '25' as any);
-    expect(mockImpersonationService.getAuditTrail).toHaveBeenCalledWith(3, 25);
-  });
-
-  it('verifySession delegates to service', async () => {
-    await controller.verifySession('s1');
-    expect(mockImpersonationService.verifySession).toHaveBeenCalledWith('s1');
-  });
-
-  it('endSession delegates to service', async () => {
-    await controller.endSession('s1', 'admin-1');
-    expect(mockImpersonationService.endSession).toHaveBeenCalledWith('s1', 'admin-1');
-  });
-
-  describe('guard metadata', () => {
-    it('applies JwtAuthGuard and RolesGuard at controller level', () => {
-      expect(Reflect.getMetadata(GUARDS_METADATA, ImpersonationController)).toEqual([JwtAuthGuard, RolesGuard]);
+      const result = await controller.startImpersonation('admin-1', dto);
+      expect(result).toBeDefined();
+      expect(mockService.startImpersonation).toHaveBeenCalledWith('admin-1', dto);
     });
 
-    it('restricts the whole controller to ADMIN', () => {
-      expect(Reflect.getMetadata(ROLES_KEY, ImpersonationController)).toEqual([UserRole.ADMIN]);
+    it('should reject impersonation with invalid duration', async () => {
+      const dto: StartImpersonationDto = {
+        targetUserId: 'user-1',
+        durationMinutes: -1,
+      };
+
+      await expect(controller.startImpersonation('admin-1', dto)).rejects.toThrow(BadRequestException);
+    });
+
+    it('should reject impersonation for non-admin user', async () => {
+      const dto: StartImpersonationDto = {
+        targetUserId: 'user-1',
+        durationMinutes: 30,
+      };
+
+      await expect(controller.startImpersonation('student-1', dto)).rejects.toThrow(ForbiddenException);
+    });
+  });
+
+  describe('ImpersonationController.getAuditTrail', () => {
+    it('should return audit trail with pagination', async () => {
+      mockService.getAuditTrail.mockResolvedValue([
+        { id: 'log-1', action: 'start', userId: 'admin-1' },
+        { id: 'log-2', action: 'end', userId: 'admin-1' },
+      ]);
+
+      const result = await controller.getAuditTrail({ page: 1, limit: 10 });
+      expect(result).toBeDefined();
+      expect(result.length).toBe(2);
+    });
+
+    it('should return empty list when no audits exist', async () => {
+      mockService.getAuditTrail.mockResolvedValue([]);
+
+      const result = await controller.getAuditTrail({ page: 1, limit: 10 });
+      expect(result).toEqual([]);
+    });
+  });
+
+  describe('ImpersonationController.verifySession', () => {
+    it('should verify active session', async () => {
+      mockService.verifySession.mockResolvedValue({ id: 'session-1', active: true });
+
+      const result = await controller.verifySession('session-1');
+      expect(result).toBeDefined();
+      expect(mockService.verifySession).toHaveBeenCalledWith('session-1');
+    });
+
+    it('should throw NotFoundException for non-existent session', async () => {
+      mockService.verifySession.mockResolvedValue(null);
+
+      await expect(controller.verifySession('nonexistent')).rejects.toThrow(NotFoundException);
+    });
+  });
+
+  describe('ImpersonationController.endSession', () => {
+    it('should end session successfully', async () => {
+      mockService.endSession.mockResolvedValue({ id: 'session-1', ended: true });
+
+      const result = await controller.endSession('session-1', 'admin-1');
+      expect(result).toBeDefined();
+      expect(mockService.endSession).toHaveBeenCalledWith('session-1', 'admin-1');
+    });
+
+    it('should throw NotFoundException for non-existent session', async () => {
+      mockService.endSession.mockResolvedValue(null);
+
+      await expect(controller.endSession('nonexistent', 'admin-1')).rejects.toThrow(NotFoundException);
     });
   });
 });

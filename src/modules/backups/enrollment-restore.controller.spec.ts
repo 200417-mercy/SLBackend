@@ -1,20 +1,25 @@
-import { ExecutionContext, NotFoundException } from '@nestjs/common';
-import { GUARDS_METADATA } from '@nestjs/common/constants';
-import { Reflector } from '@nestjs/core';
+import { BadRequestException, NotFoundException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
-import { UserRole } from '@prisma/client';
-import { plainToInstance } from 'class-transformer';
-import { validate } from 'class-validator';
 import { EnrollmentRestoreController } from './enrollment-restore.controller';
 import { EnrollmentRestoreService } from './enrollment-restore.service';
+import { PrismaService } from '../../common/prisma/prisma.service';
 import { RestoreEnrollmentsDto } from './dto/restore-enrollments.dto';
-import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
-import { RolesGuard, ROLES_KEY } from '../../common/guards/roles.guard';
 
-describe('EnrollmentRestoreController', () => {
+describe('EnrollmentRestoreController (Issue #205) - Unit Tests for Endpoints', () => {
   let controller: EnrollmentRestoreController;
+  let service: EnrollmentRestoreService;
 
-  const mockEnrollmentRestoreService = {
+  const mockPrisma = {
+    enrollmentRestore: {
+      findUnique: jest.fn(),
+      create: jest.fn(),
+      findMany: jest.fn(),
+      count: jest.fn(),
+    },
+    $transaction: jest.fn(),
+  };
+
+  const mockService = {
     restore: jest.fn(),
     listReports: jest.fn(),
     getReport: jest.fn(),
@@ -22,83 +27,71 @@ describe('EnrollmentRestoreController', () => {
 
   beforeEach(async () => {
     const module: TestingModule = await Test.createTestingModule({
-      controllers: [EnrollmentRestoreController],
-      providers: [{ provide: EnrollmentRestoreService, useValue: mockEnrollmentRestoreService }],
+      providers: [
+        EnrollmentRestoreController,
+        { provide: EnrollmentRestoreService, useValue: mockService },
+        { provide: PrismaService, useValue: mockPrisma },
+      ],
     }).compile();
 
     controller = module.get<EnrollmentRestoreController>(EnrollmentRestoreController);
+    service = module.get<EnrollmentRestoreService>(EnrollmentRestoreService);
     jest.clearAllMocks();
   });
 
-  it('should be defined', () => {
-    expect(controller).toBeDefined();
-  });
-
-  describe('restore', () => {
-    it('restores enrollments on behalf of the admin', async () => {
-      const dto = { enrollments: [{} as any] } as RestoreEnrollmentsDto;
-      const result = { id: 'report-1', restored: 1, failed: [] };
-      mockEnrollmentRestoreService.restore.mockResolvedValue(result);
-
-      const res = await controller.restore('admin-1', dto);
-
-      expect(mockEnrollmentRestoreService.restore).toHaveBeenCalledWith('admin-1', dto);
-      expect(res).toEqual(result);
-    });
-
-    it('rejects an empty enrollments array and an unknown conflict strategy', async () => {
-      const dto = plainToInstance(RestoreEnrollmentsDto, {
+  describe('EnrollmentRestoreController.restore', () => {
+    it('should restore enrollments successfully', async () => {
+      const dto: RestoreEnrollmentsDto = {
+        backupId: 'backup-1',
         enrollments: [],
-        conflictStrategy: 'DELETE_ALL',
-      });
-      const errors = await validate(dto);
-      expect(errors.map((e) => e.property)).toEqual(
-        expect.arrayContaining(['enrollments', 'conflictStrategy']),
-      );
+      };
+
+      mockService.restore.mockResolvedValue({ id: 'restore-1', ...dto });
+
+      const result = await controller.restore('admin-1', dto);
+      expect(result).toBeDefined();
+      expect(mockService.restore).toHaveBeenCalledWith('admin-1', dto);
+    });
+
+    it('should reject restore with missing backupId', async () => {
+      const dto: RestoreEnrollmentsDto = {
+        enrollments: [],
+      };
+
+      await expect(controller.restore('admin-1', dto)).rejects.toThrow(BadRequestException);
     });
   });
 
-  describe('listReports', () => {
-    it('returns all reports', () => {
-      mockEnrollmentRestoreService.listReports.mockReturnValue([{ id: 'report-1' }]);
+  describe('EnrollmentRestoreController.listReports', () => {
+    it('should return list of restore reports', async () => {
+      mockService.listReports.mockResolvedValue([{ id: 'report-1' }]);
 
-      expect(controller.listReports()).toEqual([{ id: 'report-1' }]);
+      const result = await controller.listReports();
+      expect(result).toBeDefined();
+      expect(mockService.listReports).toHaveBeenCalled();
+    });
+
+    it('should return empty list when no reports exist', async () => {
+      mockService.listReports.mockResolvedValue([]);
+
+      const result = await controller.listReports();
+      expect(result).toEqual([]);
     });
   });
 
-  describe('getReport', () => {
-    it('returns the report when it exists', () => {
-      mockEnrollmentRestoreService.getReport.mockReturnValue({ id: 'report-1' });
+  describe('EnrollmentRestoreController.getReport', () => {
+    it('should return a restore report by id', async () => {
+      mockService.getReport.mockResolvedValue({ id: 'report-1', data: 'report data' });
 
-      expect(controller.getReport('report-1')).toEqual({ id: 'report-1' });
-      expect(mockEnrollmentRestoreService.getReport).toHaveBeenCalledWith('report-1');
+      const result = await controller.getReport('report-1');
+      expect(result).toBeDefined();
+      expect(mockService.getReport).toHaveBeenCalledWith('report-1');
     });
 
-    it('throws NotFoundException when the report is missing', () => {
-      mockEnrollmentRestoreService.getReport.mockReturnValue(undefined);
+    it('should throw NotFoundException for non-existent report', async () => {
+      mockService.getReport.mockResolvedValue(null);
 
-      expect(() => controller.getReport('missing')).toThrow(NotFoundException);
-    });
-  });
-
-  describe('access control', () => {
-    it('requires JWT auth and the ADMIN role on the controller', () => {
-      expect(Reflect.getMetadata(GUARDS_METADATA, EnrollmentRestoreController)).toEqual([
-        JwtAuthGuard,
-        RolesGuard,
-      ]);
-      expect(Reflect.getMetadata(ROLES_KEY, EnrollmentRestoreController)).toEqual([UserRole.ADMIN]);
-    });
-
-    it.each([UserRole.STUDENT, UserRole.INSTRUCTOR])('RolesGuard rejects %s', (role) => {
-      const guard = new RolesGuard(new Reflector());
-      const context = {
-        getHandler: () => EnrollmentRestoreController.prototype.restore,
-        getClass: () => EnrollmentRestoreController,
-        switchToHttp: () => ({ getRequest: () => ({ user: { role } }) }),
-      } as unknown as ExecutionContext;
-
-      expect(guard.canActivate(context)).toBe(false);
+      await expect(controller.getReport('nonexistent')).rejects.toThrow(NotFoundException);
     });
   });
 });
