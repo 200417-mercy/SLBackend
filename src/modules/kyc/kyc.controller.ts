@@ -4,6 +4,7 @@ import {
   HttpCode, HttpStatus,
 } from '@nestjs/common';
 import { FileFieldsInterceptor } from '@nestjs/platform-express';
+import { ThrottlerGuard, Throttle } from '@nestjs/throttler';
 import { memoryStorage } from 'multer';
 import { ApiTags, ApiOperation, ApiBearerAuth, ApiConsumes, ApiBody, ApiQuery } from '@nestjs/swagger';
 import { KycService } from './kyc.service';
@@ -27,7 +28,8 @@ export class KycController {
   // ----------------------------------------------------------
 
   @Post('submit')
-  @UseGuards(RolesGuard)
+  @UseGuards(RolesGuard, ThrottlerGuard)
+  @Throttle({ default: { limit: 5, ttl: 3_600_000 } })
   @Roles(UserRole.INSTRUCTOR)
   @HttpCode(HttpStatus.CREATED)
   @UseInterceptors(
@@ -104,7 +106,8 @@ export class KycController {
   }
 
   @Post(':id/review')
-  @UseGuards(RolesGuard)
+  @UseGuards(RolesGuard, ThrottlerGuard)
+  @Throttle({ default: { limit: 30, ttl: 60_000 } })
   @Roles(UserRole.ADMIN)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Approve or reject a KYC submission (admin only)' })

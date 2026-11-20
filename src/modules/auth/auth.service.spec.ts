@@ -153,5 +153,72 @@ describe('AuthService', () => {
     ).rejects.toBeInstanceOf(UnauthorizedException);
     expect(refreshTokens.issueTokenPair).not.toHaveBeenCalled();
   });
+
+  it('rejects a replay of a nonce that was already used to log in', async () => {
+    const keypair = Keypair.random();
+    const stellarAddress = keypair.publicKey();
+    prisma.user.findUnique.mockResolvedValue(null);
+    prisma.user.upsert.mockResolvedValue({ id: 'user-1', stellarAddress, role: 'STUDENT' });
+
+    const service = buildService();
+    const nonce = service.generateNonce(stellarAddress);
+    const signature = keypair.sign(Buffer.from(nonce, 'utf-8')).toString('base64');
+
+    await service.login({ stellarAddress, signedNonce: nonce, signature });
+
+    await expect(
+      service.login({ stellarAddress, signedNonce: nonce, signature }),
+    ).rejects.toBeInstanceOf(UnauthorizedException);
+    expect(refreshTokens.issueTokenPair).toHaveBeenCalledTimes(1);
+  });
+
+  it('requires a TOTP code when the account has two-factor enabled', async () => {
+    const keypair = Keypair.random();
+    const stellarAddress = keypair.publicKey();
+    prisma.user.findUnique.mockResolvedValue({
+      id: 'user-1',
+      stellarAddress,
+      twoFactorEnabled: true,
+    });
+    const twoFactor = { verifyLoginCode: jest.fn() };
+    const service = new AuthService(
+      prisma as any,
+      jwt as any,
+      referrals as any,
+      sessions as any,
+      refreshTokens as any,
+      twoFactor as any,
+    );
+    const nonce = service.generateNonce(stellarAddress);
+    const signature = keypair.sign(Buffer.from(nonce, 'utf-8')).toString('base64');
+
+    await expect(
+      service.login({ stellarAddress, signedNonce: nonce, signature }),
+    ).rejects.toBeInstanceOf(UnauthorizedException);
+    expect(twoFactor.verifyLoginCode).not.toHaveBeenCalled();
+    expect(prisma.user.upsert).not.toHaveBeenCalled();
+  });
+
+  it('still logs in a new user when the referral code is rejected', async () => {
+    const keypair = Keypair.random();
+    const stellarAddress = keypair.publicKey();
+    prisma.user.findUnique.mockResolvedValue(null);
+    prisma.user.upsert.mockResolvedValue({ id: 'user-1', stellarAddress, role: 'STUDENT' });
+    referrals.validateCode.mockRejectedValueOnce(new Error('unknown code'));
+
+    const service = buildService();
+    const nonce = service.generateNonce(stellarAddress);
+    const signature = keypair.sign(Buffer.from(nonce, 'utf-8')).toString('base64');
+
+    const result = await service.login({
+      stellarAddress,
+      signedNonce: nonce,
+      signature,
+      referralCode: 'BAD-CODE',
+    });
+
+    expect(referrals.trackSignup).not.toHaveBeenCalled();
+    expect(result.accessToken).toBe('access-jwt');
+  });
 });
 

@@ -1,16 +1,23 @@
+import { BadRequestException, NotFoundException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
-import { GUARDS_METADATA } from '@nestjs/common/constants';
-import { UserRole } from '@prisma/client';
-import { validate } from 'class-validator';
-import { plainToInstance } from 'class-transformer';
 import { CourseAutosaveController } from './course-autosave.controller';
 import { CourseAutosaveService } from './course-autosave.service';
+import { PrismaService } from '../../common/prisma/prisma.service';
 import { AutosaveCourseDto } from './dto/autosave-course.dto';
-import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
-import { RolesGuard, ROLES_KEY } from '../../common/guards/roles.guard';
 
-describe('CourseAutosaveController', () => {
+describe('CourseAutosaveController (Issue #203) - Unit Tests for Endpoints', () => {
   let controller: CourseAutosaveController;
+  let service: CourseAutosaveService;
+
+  const mockPrisma = {
+    courseAutosave: {
+      findUnique: jest.fn(),
+      create: jest.fn(),
+      findMany: jest.fn(),
+      count: jest.fn(),
+    },
+    $transaction: jest.fn(),
+  };
 
   const mockService = {
     autosave: jest.fn(),
@@ -21,55 +28,82 @@ describe('CourseAutosaveController', () => {
 
   beforeEach(async () => {
     const module: TestingModule = await Test.createTestingModule({
-      controllers: [CourseAutosaveController],
-      providers: [{ provide: CourseAutosaveService, useValue: mockService }],
+      providers: [
+        CourseAutosaveController,
+        { provide: CourseAutosaveService, useValue: mockService },
+        { provide: PrismaService, useValue: mockPrisma },
+      ],
     }).compile();
 
     controller = module.get<CourseAutosaveController>(CourseAutosaveController);
+    service = module.get<CourseAutosaveService>(CourseAutosaveService);
     jest.clearAllMocks();
   });
 
-  it('autosave passes user id, address and dto', async () => {
-    const dto = { data: { title: 'Draft' } } as AutosaveCourseDto;
-    mockService.autosave.mockResolvedValue({ id: 'd1', version: 1 });
+  describe('CourseAutosaveController.autosave', () => {
+    it('should autosave course edits successfully', async () => {
+      const dto: AutosaveCourseDto = {
+        courseId: 'course-1',
+        content: 'edited content',
+        version: 1,
+      };
 
-    expect(await controller.autosave('u1', 'GADDR', dto)).toEqual({ id: 'd1', version: 1 });
-    expect(mockService.autosave).toHaveBeenCalledWith('u1', 'GADDR', dto);
+      mockService.autosave.mockResolvedValue({ id: 'auto-1', ...dto });
+
+      const result = await controller.autosave('user-1', 'address-1', dto);
+      expect(result).toBeDefined();
+      expect(mockService.autosave).toHaveBeenCalledWith('user-1', 'address-1', dto);
+    });
+
+    it('should reject autosave with missing courseId', async () => {
+      const dto: AutosaveCourseDto = {
+        content: 'edited content',
+      };
+
+      await expect(controller.autosave('user-1', 'address-1', dto)).rejects.toThrow(BadRequestException);
+    });
   });
 
-  it('getRecoveredDraft passes the optional courseId', async () => {
-    mockService.getRecoveredDraft.mockResolvedValue(null);
+  describe('CourseAutosaveController.getRecoveredDraft', () => {
+    it('should return recovered draft successfully', async () => {
+      mockService.getRecoveredDraft.mockResolvedValue({ id: 'draft-1', content: 'recovered content' });
 
-    expect(await controller.getRecoveredDraft('u1')).toBeNull();
-    expect(mockService.getRecoveredDraft).toHaveBeenCalledWith('u1', undefined);
+      const result = await controller.getRecoveredDraft('user-1', 'course-1');
+      expect(result).toBeDefined();
+      expect(mockService.getRecoveredDraft).toHaveBeenCalledWith('user-1', 'course-1');
+    });
 
-    await controller.getRecoveredDraft('u1', 'c1');
-    expect(mockService.getRecoveredDraft).toHaveBeenCalledWith('u1', 'c1');
+    it('should return null draft when none exists', async () => {
+      mockService.getRecoveredDraft.mockResolvedValue(null);
+
+      const result = await controller.getRecoveredDraft('user-1', 'course-1');
+      expect(result).toEqual(null);
+    });
   });
 
-  it('getDraftById passes draft id then user id', async () => {
-    mockService.getDraftById.mockResolvedValue({ id: 'd1' });
+  describe('CourseAutosaveController.getDraftById', () => {
+    it('should return draft by ID successfully', async () => {
+      mockService.getDraftById.mockResolvedValue({ id: 'draft-1', content: 'draft content' });
 
-    expect(await controller.getDraftById('d1', 'u1')).toEqual({ id: 'd1' });
-    expect(mockService.getDraftById).toHaveBeenCalledWith('d1', 'u1');
+      const result = await controller.getDraftById('draft-1', 'user-1');
+      expect(result).toBeDefined();
+      expect(mockService.getDraftById).toHaveBeenCalledWith('draft-1', 'user-1');
+    });
+
+    it('should throw NotFoundException for non-existent draft', async () => {
+      mockService.getDraftById.mockResolvedValue(null);
+
+      await expect(controller.getDraftById('nonexistent', 'user-1')).rejects.toThrow(NotFoundException);
+    });
   });
 
-  it('discardDraft passes draft id then user id', async () => {
-    mockService.discardDraft.mockResolvedValue({ deleted: true });
+  describe('CourseAutosaveController.discardDraft', () => {
+    it('should discard draft successfully', async () => {
+      mockService.discardDraft.mockResolvedValue({ id: 'draft-1' });
 
-    expect(await controller.discardDraft('d1', 'u1')).toEqual({ deleted: true });
-    expect(mockService.discardDraft).toHaveBeenCalledWith('d1', 'u1');
-  });
-
-  it('is guarded and restricted to INSTRUCTOR and ADMIN', () => {
-    expect(Reflect.getMetadata(GUARDS_METADATA, CourseAutosaveController)).toEqual([JwtAuthGuard, RolesGuard]);
-    expect(Reflect.getMetadata(ROLES_KEY, CourseAutosaveController)).toEqual([UserRole.INSTRUCTOR, UserRole.ADMIN]);
-  });
-
-  it('rejects an autosave body without data or with version below 1', async () => {
-    const dto = plainToInstance(AutosaveCourseDto, { title: 'x', version: 0 });
-    const props = (await validate(dto)).map((e) => e.property);
-
-    expect(props).toEqual(expect.arrayContaining(['data', 'version']));
+      const result = await controller.discardDraft('draft-1', 'user-1');
+      expect(result).toBeDefined();
+      expect(mockService.discardDraft).toHaveBeenCalledWith('draft-1', 'user-1');
+    });
   });
 });

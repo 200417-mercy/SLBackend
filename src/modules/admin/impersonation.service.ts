@@ -3,6 +3,7 @@ import { JwtService } from '@nestjs/jwt';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { StartImpersonationDto } from './dto/start-impersonation.dto';
 import { v4 as uuidv4 } from 'uuid';
+import { AuditLogService } from '../audit-log/audit-log.service';
 
 export interface ImpersonationAuditLog {
   sessionId: string;
@@ -24,6 +25,7 @@ export class ImpersonationService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly jwtService: JwtService,
+    private readonly auditLogService: AuditLogService,
   ) {}
 
   async startImpersonation(adminId: string, dto: StartImpersonationDto) {
@@ -35,6 +37,9 @@ export class ImpersonationService {
     const targetUser = await this.prisma.user.findUnique({ where: { id: dto.targetUserId } });
     if (!targetUser) {
       throw new NotFoundException(`Target user with ID ${dto.targetUserId} not found`);
+    }
+    if (targetUser.role === 'ADMIN') {
+      throw new ForbiddenException('Admins cannot impersonate other admin users');
     }
 
     const durationSeconds = dto.durationSeconds ?? 3600;
@@ -67,6 +72,12 @@ export class ImpersonationService {
     };
 
     this.auditTrail.unshift(logEntry);
+    await this.auditLogService.createEntry(adminId, {
+      action: 'IMPERSONATION_STARTED',
+      targetType: 'USER',
+      targetId: targetUser.id,
+      metadata: { sessionId, durationSeconds, reason: dto.reason ?? null },
+    });
     this.logger.log(
       `Admin ${adminId} started impersonating user ${targetUser.id} for ${durationSeconds}s (Session: ${sessionId})`,
     );
@@ -127,7 +138,7 @@ export class ImpersonationService {
     };
   }
 
-  endSession(sessionId: string, adminId: string) {
+  async endSession(sessionId: string, adminId: string) {
     const log = this.auditTrail.find((s) => s.sessionId === sessionId);
     if (!log) {
       throw new NotFoundException('Impersonation session not found');
@@ -137,6 +148,12 @@ export class ImpersonationService {
     }
 
     log.status = 'ENDED';
+    await this.auditLogService.createEntry(adminId, {
+      action: 'IMPERSONATION_ENDED',
+      targetType: 'USER',
+      targetId: log.targetUserId,
+      metadata: { sessionId },
+    });
     this.logger.log(`Impersonation session ${sessionId} ended by admin ${adminId}`);
     return { sessionId, status: 'ENDED', endedAt: new Date() };
   }

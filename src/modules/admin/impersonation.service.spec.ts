@@ -3,6 +3,7 @@ import { ImpersonationService } from './impersonation.service';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { JwtService } from '@nestjs/jwt';
 import { ForbiddenException, NotFoundException } from '@nestjs/common';
+import { AuditLogService } from '../audit-log/audit-log.service';
 
 const mockAdminUser = {
   id: 'admin-1',
@@ -30,6 +31,10 @@ const mockJwtService = {
   sign: jest.fn().mockReturnValue('mock-impersonation-jwt-token'),
 };
 
+const mockAuditLogService = {
+  createEntry: jest.fn().mockResolvedValue({}),
+};
+
 describe('ImpersonationService', () => {
   let service: ImpersonationService;
 
@@ -39,6 +44,7 @@ describe('ImpersonationService', () => {
         ImpersonationService,
         { provide: PrismaService, useValue: mockPrisma },
         { provide: JwtService, useValue: mockJwtService },
+        { provide: AuditLogService, useValue: mockAuditLogService },
       ],
     }).compile();
 
@@ -69,6 +75,27 @@ describe('ImpersonationService', () => {
       expect(audit.data[0].adminId).toBe('admin-1');
       expect(audit.data[0].targetUserId).toBe('user-1');
       expect(audit.data[0].reason).toBe('Debugging student payment issue');
+      expect(mockAuditLogService.createEntry).toHaveBeenCalledWith(
+        'admin-1',
+        expect.objectContaining({ action: 'IMPERSONATION_STARTED', targetId: 'user-1' }),
+      );
+      expect(mockJwtService.sign).toHaveBeenCalledWith(
+        expect.objectContaining({ isImpersonating: true, impersonatorId: 'admin-1' }),
+        expect.anything(),
+      );
+    });
+
+    it('throws ForbiddenException when the target is another admin', async () => {
+      mockPrisma.user.findUnique.mockImplementation(({ where }) => {
+        if (where.id === 'admin-1') return Promise.resolve(mockAdminUser);
+        if (where.id === 'admin-2') return Promise.resolve({ ...mockAdminUser, id: 'admin-2' });
+        return Promise.resolve(null);
+      });
+
+      await expect(
+        service.startImpersonation('admin-1', { targetUserId: 'admin-2' }),
+      ).rejects.toThrow(ForbiddenException);
+      expect(mockJwtService.sign).not.toHaveBeenCalled();
     });
 
     it('throws ForbiddenException if requesting user is not admin', async () => {
@@ -109,8 +136,12 @@ describe('ImpersonationService', () => {
       const verified = service.verifySession(started.sessionId);
       expect(verified.isActive).toBe(true);
 
-      const ended = service.endSession(started.sessionId, 'admin-1');
+      const ended = await service.endSession(started.sessionId, 'admin-1');
       expect(ended.status).toBe('ENDED');
+      expect(mockAuditLogService.createEntry).toHaveBeenCalledWith(
+        'admin-1',
+        expect.objectContaining({ action: 'IMPERSONATION_ENDED', targetId: 'user-1' }),
+      );
 
       const reVerified = service.verifySession(started.sessionId);
       expect(reVerified.isActive).toBe(false);
