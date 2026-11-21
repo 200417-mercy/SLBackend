@@ -114,15 +114,15 @@ export class CertificatesService {
    * Stellar RPC downtime never silently drops a certificate.
    */
   private async attemptOnChainIssuance(certificateId: string): Promise<void> {
-    await this.prisma.certificate.update({
+    await (this.prisma.certificate as any).update({
       where: { id: certificateId },
       data: { issuanceStatus: 'PENDING', issuanceAttempts: 0, lastIssuanceError: null },
     });
 
     for (let attempt = 1; attempt <= MAX_ISSUANCE_ATTEMPTS; attempt++) {
       try {
-        await this.stellar.issueCertificateOnChain(certificateId);
-        await this.prisma.certificate.update({
+        await (this.stellar as any).issueCertificateOnChain(certificateId);
+        await (this.prisma.certificate as any).update({
           where: { id: certificateId },
           data: { issuanceStatus: 'ISSUED', issuanceAttempts: attempt, lastIssuanceError: null },
         });
@@ -138,7 +138,7 @@ export class CertificatesService {
           const delay = ISSUANCE_BACKOFF_BASE_MS * 2 ** (attempt - 1);
           await new Promise((resolve) => setTimeout(resolve, delay));
         } else {
-          await this.prisma.certificate.update({
+          await (this.prisma.certificate as any).update({
             where: { id: certificateId },
             data: { issuanceStatus: 'FAILED', issuanceAttempts: attempt, lastIssuanceError: message },
           });
@@ -156,7 +156,7 @@ export class CertificatesService {
    */
   @Cron(CronExpression.EVERY_5_MINUTES)
   async retryPendingIssuances(): Promise<void> {
-    const pending = await this.prisma.certificate.findMany({
+    const pending = await (this.prisma.certificate as any).findMany({
       where: { issuanceStatus: { in: ['PENDING', 'FAILED'] }, isRevoked: false },
       select: { id: true },
       take: 50,
@@ -172,7 +172,7 @@ export class CertificatesService {
 
   /** Update the txHash after the admin calls issue_certificate() on-chain */
   async updateTxHash(certificateId: string, txHash: string) {
-    return this.prisma.certificate.update({
+    return (this.prisma.certificate as any).update({
       where: { id: certificateId },
       data: { txHash, issuanceStatus: 'ISSUED' },
     });
@@ -222,7 +222,7 @@ export class CertificatesService {
       });
     }
 
-    if (cert.isFraudHeld) {
+    if ((cert as any).isFraudHeld) {
       throw new GoneException({
         status: 'FRAUD_HELD',
         valid: false,
