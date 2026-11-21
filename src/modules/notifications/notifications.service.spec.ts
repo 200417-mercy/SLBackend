@@ -519,6 +519,53 @@ describe('NotificationsService', () => {
     });
   });
 
+  describe('markAsRead()', () => {
+    it('rejects an unknown notification', async () => {
+      mockPrisma.notification.findUnique.mockResolvedValueOnce(null);
+
+      await expect(service.markAsRead('missing', 'user-1')).rejects.toThrow(NotFoundException);
+    });
+
+    it('rejects a notification owned by another user', async () => {
+      mockPrisma.notification.findUnique.mockResolvedValueOnce({
+        id: 'notif-1',
+        userId: 'user-2',
+        read: false,
+      });
+
+      await expect(service.markAsRead('notif-1', 'user-1')).rejects.toThrow(ForbiddenException);
+      expect(mockPrisma.notification.update).not.toHaveBeenCalled();
+    });
+
+    it('marks an unread notification as read', async () => {
+      mockPrisma.notification.findUnique.mockResolvedValueOnce({
+        id: 'notif-1',
+        userId: 'user-1',
+        read: false,
+      });
+
+      const result = await service.markAsRead('notif-1', 'user-1');
+
+      expect(mockPrisma.notification.update).toHaveBeenCalledWith({
+        where: { id: 'notif-1' },
+        data: { read: true },
+      });
+      expect(result).toEqual({ id: 'notif-1', read: true });
+    });
+  });
+
+  describe('markAllAsRead()', () => {
+    it('marks every unread notification of the user as read', async () => {
+      const result = await service.markAllAsRead('user-1');
+
+      expect(mockPrisma.notification.updateMany).toHaveBeenCalledWith({
+        where: { userId: 'user-1', read: false },
+        data: { read: true },
+      });
+      expect(result).toEqual({ success: true, markedCount: 2 });
+    });
+  });
+
   describe('markAllRead()', () => {
     it('marks every unread notification of the user as read', async () => {
       mockPrisma.notification.count.mockResolvedValueOnce(0);
@@ -600,6 +647,72 @@ describe('NotificationsService', () => {
         where: { userId: 'user-1', isActive: true },
         select: { token: true, platform: true },
       });
+    });
+  });
+
+  describe('assertValidNotificationType()', () => {
+    it('rejects an invalid notification type', () => {
+      expect(() =>
+        (service as any).assertValidNotificationType('NOT_A_TYPE'),
+      ).toThrow(BadRequestException);
+    });
+
+    it('accepts a valid notification type', () => {
+      expect(() =>
+        (service as any).assertValidNotificationType(NotificationType.COURSE_APPROVED),
+      ).not.toThrow();
+    });
+  });
+
+  describe('assertValidToken()', () => {
+    it('rejects an empty token', () => {
+      expect(() => (service as any).assertValidToken('')).toThrow(BadRequestException);
+    });
+
+    it('rejects a token that is too short', () => {
+      expect(() => (service as any).assertValidToken('short')).toThrow(BadRequestException);
+    });
+
+    it('accepts a token of sufficient length', () => {
+      expect(() => (service as any).assertValidToken('device-token-1')).not.toThrow();
+    });
+  });
+
+  describe('removeDeviceToken()', () => {
+    it('deactivates the token of the user', async () => {
+      mockPrisma.notificationDeviceToken.updateMany = jest.fn().mockResolvedValue({ count: 1 });
+
+      await service.removeDeviceToken('user-1', 'device-token-1');
+
+      expect(mockPrisma.notificationDeviceToken.updateMany).toHaveBeenCalledWith({
+        where: { userId: 'user-1', token: 'device-token-1' },
+        data: { isActive: false },
+      });
+    });
+  });
+
+  describe('ensurePreferenceDefaults()', () => {
+    it('creates the missing preference rows and the digest preference', async () => {
+      mockPrisma.notificationPreference.findMany.mockImplementation(async (args: any) =>
+        args?.select ? [{ type: NotificationType.COURSE_APPROVED }] : [],
+      );
+      mockPrisma.notificationDigestPreference.findUnique.mockResolvedValueOnce(null);
+
+      await (service as any).ensurePreferenceDefaults('user-1');
+
+      expect(mockPrisma.notificationPreference.create).toHaveBeenCalledTimes(
+        allTypes.length - 1,
+      );
+      expect(mockPrisma.notificationDigestPreference.create).toHaveBeenCalledWith({
+        data: { userId: 'user-1', emailEnabled: true },
+      });
+    });
+
+    it('does not create rows when all preferences already exist', async () => {
+      await (service as any).ensurePreferenceDefaults('user-1');
+
+      expect(mockPrisma.notificationPreference.create).not.toHaveBeenCalled();
+      expect(mockPrisma.notificationDigestPreference.create).not.toHaveBeenCalled();
     });
   });
 

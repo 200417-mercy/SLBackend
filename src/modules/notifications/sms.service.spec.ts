@@ -110,6 +110,39 @@ describe('SmsService', () => {
       expect(service.validatePhoneNumber('0821234567', 'ZA')).toBe('+27821234567');
       expect(service.validatePhoneNumber('0754123456', 'TZ')).toBe('+255754123456');
     });
+
+    it.each([
+      ['NG', '08012345678', '+2348012345678'],
+      ['KE', '0712345678', '+254712345678'],
+      ['UG', '0772345678', '+256772345678'],
+      ['GH', '0241234567', '+233241234567'],
+      ['ZA', '0821234567', '+27821234567'],
+      ['TZ', '0754123456', '+255754123456'],
+    ])('normalises a local %s number into E.164 form', (country, local, expected) => {
+      expect(service.validatePhoneNumber(local, country)).toBe(expected);
+    });
+
+    it.each([
+      ['NG', '+2348012345678'],
+      ['KE', '+254712345678'],
+      ['UG', '+256772345678'],
+      ['GH', '+233241234567'],
+      ['ZA', '+27821234567'],
+      ['TZ', '+255754123456'],
+    ])('keeps an already international %s number untouched', (country, international) => {
+      expect(service.validatePhoneNumber(international, country)).toBe(international);
+    });
+
+    it.each([
+      ['ng', '08012345678', '+2348012345678'],
+      ['ke', '0712345678', '+254712345678'],
+      ['ug', '0772345678', '+256772345678'],
+      ['gh', '0241234567', '+233241234567'],
+      ['za', '0821234567', '+27821234567'],
+      ['tz', '0754123456', '+255754123456'],
+    ])('accepts a lower-case %s country code', (country, local, expected) => {
+      expect(service.validatePhoneNumber(local, country)).toBe(expected);
+    });
   });
 
   describe('renderTemplate()', () => {
@@ -143,6 +176,32 @@ describe('SmsService', () => {
       expect(() =>
         service.renderTemplate('NOT_A_TEMPLATE' as SmsTemplateKey),
       ).toThrow(BadRequestException);
+    });
+
+    it.each(Object.values(SmsTemplateKey))(
+      'renders the %s template without throwing',
+      (templateKey) => {
+        const rendered = service.renderTemplate(templateKey, {
+          name: 'Ada',
+          code: '123456',
+          minutes: 10,
+          courseTitle: 'Intro to Stellar',
+          amount: '100',
+          message: 'A generic alert',
+        });
+
+        expect(typeof rendered).toBe('string');
+        expect(rendered.length).toBeGreaterThan(0);
+      },
+    );
+
+    it('leaves multiple unknown placeholders untouched', () => {
+      const rendered = service.renderTemplate(SmsTemplateKey.ENROLLMENT_CONFIRMED, {
+        name: 'Ada',
+      });
+
+      expect(rendered).toContain('{{courseTitle}}');
+      expect(rendered).toContain('Ada');
     });
   });
 
@@ -248,6 +307,57 @@ describe('SmsService', () => {
       });
       expect(result).toEqual({ id: 'sms-1', status: SmsStatus.SENT });
     });
+
+    it('marks the message failed when the gateway response has no Recipients array', async () => {
+      mockGatewaySend.mockResolvedValueOnce({ SMSMessageData: {} });
+
+      const result = await service.sendSms({
+        phoneNumber: '08012345678',
+        countryCode: 'NG',
+        message: 'Your enrollment is confirmed',
+      });
+
+      expect(mockPrisma.smsMessage.update).toHaveBeenCalledWith({
+        where: { id: 'sms-1' },
+        data: expect.objectContaining({ status: SmsStatus.FAILED }),
+      });
+      expect(result).toEqual({ id: 'sms-1', status: SmsStatus.SENT });
+    });
+
+    it('marks the message failed when the gateway returns a recipient without a messageId', async () => {
+      mockGatewaySend.mockResolvedValueOnce(gatewayResponse('Success', undefined));
+
+      const result = await service.sendSms({
+        phoneNumber: '08012345678',
+        countryCode: 'NG',
+        message: 'Your enrollment is confirmed',
+      });
+
+      expect(mockPrisma.smsMessage.update).toHaveBeenCalledWith({
+        where: { id: 'sms-1' },
+        data: expect.objectContaining({
+          status: SmsStatus.FAILED,
+          providerMessageId: undefined,
+        }),
+      });
+      expect(result).toEqual({ id: 'sms-1', status: SmsStatus.SENT });
+    });
+
+    it('propagates the error and skips the gateway when persisting the record fails', async () => {
+      mockPrisma.smsMessage.create.mockRejectedValueOnce(new Error('db down'));
+
+      await expect(
+        service.sendSms({
+          phoneNumber: '08012345678',
+          countryCode: 'NG',
+          message: 'Your enrollment is confirmed',
+        }),
+      ).rejects.toThrow('db down');
+
+      expect(mockPrisma.smsMessage.create).toHaveBeenCalledTimes(1);
+      expect(mockGatewaySend).not.toHaveBeenCalled();
+      expect(mockPrisma.smsMessage.update).not.toHaveBeenCalled();
+    });
   });
 
   describe('getDeliveryStatus()', () => {
@@ -319,6 +429,32 @@ describe('SmsService', () => {
           deliveredAt: null,
           failureReason: 'Rejected',
         },
+      });
+    });
+
+    it('treats an undefined status as failed', async () => {
+      mockPrisma.smsMessage.findUnique.mockResolvedValueOnce({ id: 'sms-1' });
+
+      await expect(
+        service.handleDeliveryCallback({ id: 'provider-1', status: undefined }),
+      ).resolves.toEqual({ acknowledged: true });
+
+      expect(mockPrisma.smsMessage.update).toHaveBeenCalledWith({
+        where: { id: 'sms-1' },
+        data: expect.objectContaining({ status: SmsStatus.FAILED }),
+      });
+    });
+
+    it('treats an empty status as failed', async () => {
+      mockPrisma.smsMessage.findUnique.mockResolvedValueOnce({ id: 'sms-1' });
+
+      await expect(
+        service.handleDeliveryCallback({ id: 'provider-1', status: '' }),
+      ).resolves.toEqual({ acknowledged: true });
+
+      expect(mockPrisma.smsMessage.update).toHaveBeenCalledWith({
+        where: { id: 'sms-1' },
+        data: expect.objectContaining({ status: SmsStatus.FAILED }),
       });
     });
   });
