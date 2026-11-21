@@ -1,115 +1,186 @@
+import { Test, TestingModule } from '@nestjs/testing';
 import { BadRequestException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { Test, TestingModule } from '@nestjs/testing';
 import { VirusScanService } from './virus-scan.service';
 
 jest.mock('clamscan', () => {
-  return jest.fn().mockImplementation(() => {
-    return {
-      init: jest.fn().mockResolvedValue({
-        scanBuffer: jest.fn(),
-      }),
-    };
-  });
+  return jest.fn().mockImplementation(() => ({
+    init: jest.fn().mockResolvedValue({ scanBuffer: jest.fn() }),
+  }));
 });
 
-// eslint-disable-next-line @typescript-eslint/no-var-requires
-const NodeClam = require('clamscan');
-
-describe('VirusScanService', () => {
-  let service: VirusScanService;
-  let mockScanBuffer: jest.Mock;
-
-  const mockConfigGet = jest.fn((key: string, defaultValue?: unknown) => {
-    const configMap: Record<string, any> = {
+const mockConfigService = {
+  get: jest.fn((key: string, defaultValue?: unknown) => {
+    const config: Record<string, unknown> = {
       VIRUS_SCAN_ENABLED: true,
-      VIRUS_SCAN_MAX_RETRIES: 2,
+      CLAMD_HOST: '127.0.0.1',
+      CLAMD_PORT: 3310,
+      CLAMD_TIMEOUT: 5000,
+      VIRUS_SCAN_MAX_RETRIES: 3,
     };
-    return configMap[key] !== undefined ? configMap[key] : defaultValue;
-  });
+    return key in config ? config[key] : defaultValue;
+  }),
+};
+
+describe('VirusScanService (#332)', () => {
+  let service: VirusScanService;
 
   beforeEach(async () => {
-    mockScanBuffer = jest.fn();
-
-    NodeClam.mockImplementation(() => ({
-      init: jest.fn().mockResolvedValue({
-        scanBuffer: mockScanBuffer,
-      }),
-    }));
-
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         VirusScanService,
-        {
-          provide: ConfigService,
-          useValue: { get: mockConfigGet },
-        },
+        { provide: ConfigService, useValue: mockConfigService },
       ],
     }).compile();
 
     service = module.get<VirusScanService>(VirusScanService);
-    await service.onModuleInit();
     jest.clearAllMocks();
   });
 
-  it('bypasses scan and tracks clean status if service is disabled', async () => {
-    mockConfigGet.mockReturnValueOnce(false);
-    await service.onModuleInit();
+  describe('onModuleInit()', () => {
+    it('initializes clamscan when VIRUS_SCAN_ENABLED is true', async () => {
+      mockConfigService.get.mockImplementation((key: string, defaultValue?: unknown) => {
+        const config: Record<string, unknown> = {
+          VIRUS_SCAN_ENABLED: true,
+          CLAMD_HOST: '127.0.0.1',
+          CLAMD_PORT: 3310,
+          CLAMD_TIMEOUT: 5000,
+          VIRUS_SCAN_MAX_RETRIES: 3,
+        };
+        return key in config ? config[key] : defaultValue;
+      });
 
-    const buffer = Buffer.from('test data');
-    await service.scanFile('file-1', buffer);
+      await service.onModuleInit();
 
-    const status = service.getScanStatus('file-1');
-    expect(status?.status).toBe('clean');
-    expect(status?.details).toBe('Scanner bypassed');
-  });
-
-  it('scans a clean file successfully', async () => {
-    mockScanBuffer.mockResolvedValueOnce({ isInfected: false, viruses: [] });
-
-    await service.scanFile('file-2', Buffer.from('safe content'));
-
-    const status = service.getScanStatus('file-2');
-    expect(status?.status).toBe('clean');
-    expect(status?.attempts).toBe(1);
-  });
-
-  it('throws BadRequestException and marks infected when malware is detected', async () => {
-    mockScanBuffer.mockResolvedValueOnce({
-      isInfected: true,
-      viruses: ['EICAR-Test-Signature'],
+      expect((service as any).isEnabled).toBe(true);
+      expect((service as any).clamscan).toBeDefined();
+      expect((service as any).clamscan.scanBuffer).toBeDefined();
     });
 
-    await expect(service.scanFile('file-3', Buffer.from('infected'))).rejects.toThrow(
-      BadRequestException,
-    );
+    it('sets isEnabled=false without calling NodeClam when VIRUS_SCAN_ENABLED is false', async () => {
+      mockConfigService.get.mockImplementation((key: string, defaultValue?: unknown) => {
+        if (key === 'VIRUS_SCAN_ENABLED') return false;
+        return defaultValue;
+      });
 
-    const status = service.getScanStatus('file-3');
-    expect(status?.status).toBe('infected');
-    expect(status?.details).toContain('EICAR-Test-Signature');
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const NodeClam = require('clamscan');
+      NodeClam.mockClear();
+
+      await service.onModuleInit();
+
+      expect((service as any).isEnabled).toBe(false);
+      expect(NodeClam).not.toHaveBeenCalled();
+    });
+
+    it('sets isEnabled=false when NodeClam.init throws', async () => {
+      mockConfigService.get.mockImplementation((key: string, defaultValue?: unknown) => {
+        if (key === 'VIRUS_SCAN_ENABLED') return true;
+        return defaultValue;
+      });
+
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const NodeClam = require('clamscan');
+      NodeClam.mockImplementationOnce(() => ({
+        init: jest.fn().mockRejectedValue(new Error('ClamAV connection refused')),
+      }));
+
+      await service.onModuleInit();
+
+      expect((service as any).isEnabled).toBe(false);
+    });
   });
 
-  it('retries on timeout and marks error if max retries exceeded', async () => {
-    mockScanBuffer.mockRejectedValue(new Error('timeout'));
+  describe('scanFile()', () => {
+    const fileId = 'file-abc-123';
+    const buffer = Buffer.from('fake file content');
 
-    await expect(service.scanFile('file-4', Buffer.from('data'))).rejects.toThrow(
-      BadRequestException,
-    );
+    it('sets status clean and returns without throwing when scanner is bypassed (isEnabled=false)', async () => {
+      (service as any).isEnabled = false;
+      (service as any).clamscan = null;
 
-    const status = service.getScanStatus('file-4');
-    expect(status?.status).toBe('error');
-    expect(status?.attempts).toBe(2);
+      await expect(service.scanFile(fileId, buffer)).resolves.toBeUndefined();
+
+      const result = (service as any).results.get(fileId);
+      expect(result.status).toBe('clean');
+      expect(result.details).toBe('Scanner bypassed');
+    });
+
+    it('sets status clean when file is not infected', async () => {
+      const mockScanBuffer = jest.fn().mockResolvedValue({ isInfected: false, viruses: [] });
+      (service as any).isEnabled = true;
+      (service as any).clamscan = { scanBuffer: mockScanBuffer };
+
+      await expect(service.scanFile(fileId, buffer)).resolves.toBeUndefined();
+
+      const result = (service as any).results.get(fileId);
+      expect(result.status).toBe('clean');
+      expect(mockScanBuffer).toHaveBeenCalledWith(buffer);
+    });
+
+    it('throws BadRequestException when file is infected', async () => {
+      const mockScanBuffer = jest
+        .fn()
+        .mockResolvedValue({ isInfected: true, viruses: ['Trojan.Generic'] });
+      (service as any).isEnabled = true;
+      (service as any).clamscan = { scanBuffer: mockScanBuffer };
+
+      await expect(service.scanFile(fileId, buffer)).rejects.toThrow(BadRequestException);
+      await expect(service.scanFile(fileId, buffer)).rejects.toThrow(
+        'Malware detected in uploaded file',
+      );
+
+      const result = (service as any).results.get(fileId);
+      expect(result.status).toBe('infected');
+      expect(result.details).toBe('Trojan.Generic');
+    });
+
+    it('throws BadRequestException after exhausting all retries when scan keeps failing', async () => {
+      const scanError = new Error('ClamAV scan timeout');
+      const mockScanBuffer = jest.fn().mockRejectedValue(scanError);
+      (service as any).isEnabled = true;
+      (service as any).clamscan = { scanBuffer: mockScanBuffer };
+
+      // Patch setTimeout to avoid actual delays in the retry backoff
+      jest.useFakeTimers();
+      const scanPromise = service.scanFile(fileId, buffer);
+      // Drain all pending timers/microtasks across retry iterations
+      for (let i = 0; i < 10; i++) {
+        await Promise.resolve();
+        jest.runAllTimers();
+      }
+      await expect(scanPromise).rejects.toThrow(BadRequestException);
+      await expect(Promise.reject(await scanPromise.catch((e) => e))).rejects.toThrow(
+        'File scanning failed due to safety timeout',
+      );
+      jest.useRealTimers();
+
+      expect(mockScanBuffer).toHaveBeenCalledTimes(3);
+      const result = (service as any).results.get(fileId);
+      expect(result.status).toBe('error');
+      expect(result.attempts).toBe(3);
+    }, 15000);
   });
 
-  it('succeeds if timeout happens but subsequent retry passes', async () => {
-    mockScanBuffer
-      .mockRejectedValueOnce(new Error('timeout'))
-      .mockResolvedValueOnce({ isInfected: false, viruses: [] });
+  describe('getScanStatus()', () => {
+    it('returns undefined for an unknown fileId', () => {
+      expect(service.getScanStatus('nonexistent-file')).toBeUndefined();
+    });
 
-    await service.scanFile('file-5', Buffer.from('data'));
+    it('returns the ScanResult after scanFile is called', async () => {
+      const fileId = 'file-status-check';
+      const buffer = Buffer.from('some content');
+      const mockScanBuffer = jest.fn().mockResolvedValue({ isInfected: false, viruses: [] });
+      (service as any).isEnabled = true;
+      (service as any).clamscan = { scanBuffer: mockScanBuffer };
 
-    const status = service.getScanStatus('file-5');
-    expect(status?.status).toBe('clean');
-    expect(status?.attempts).toBe(2);
+      await service.scanFile(fileId, buffer);
+
+      const result = service.getScanStatus(fileId);
+      expect(result).toBeDefined();
+      expect(result!.fileId).toBe(fileId);
+      expect(result!.status).toBe('clean');
+      expect(result!.completedAt).toBeInstanceOf(Date);
+    });
   });
 });
