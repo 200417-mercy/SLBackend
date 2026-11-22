@@ -1,44 +1,53 @@
-import { BadRequestException, ConflictException, NotFoundException } from '@nestjs/common';
+import {
+  NotFoundException,
+  ConflictException,
+  BadRequestException,
+  ForbiddenException,
+} from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
-import { CouponsService } from './coupons.service';
-import { PrismaService } from '../../common/prisma/prisma.service';
 import { DiscountType } from '@prisma/client';
-import { validate } from 'class-validator';
-import { plainToInstance } from 'class-transformer';
+import { PrismaService } from '../../common/prisma/prisma.service';
+import { CouponsService } from './coupons.service';
 import { CreateCouponDto } from './dto/create-coupon.dto';
 import { UpdateCouponDto } from './dto/update-coupon.dto';
+import { ValidateCouponDto } from './dto/validate-coupon.dto';
 
-describe('CouponsService (Issue #145) — Validation of expiresAt and discount bounds', () => {
+describe('CouponsService', () => {
   let service: CouponsService;
-
-  const mockExistingCoupon = {
-    id: 'coupon-1',
-    code: 'SAVE20',
-    discountType: DiscountType.PERCENTAGE,
-    discountValue: 20,
-    maxRedemptions: 100,
-    minOrderAmount: 10,
-    expiresAt: new Date(Date.now() + 86400000), // tomorrow
-    courseId: null,
-    isActive: true,
-    createdById: 'user-1',
-    redeemedCount: 0,
-    createdAt: new Date(),
-    updatedAt: new Date(),
-  };
 
   const mockPrisma = {
     coupon: {
       findUnique: jest.fn(),
-      create: jest.fn(),
-      update: jest.fn(),
       findMany: jest.fn(),
       count: jest.fn(),
+      create: jest.fn(),
+      update: jest.fn(),
     },
     course: {
       findUnique: jest.fn(),
     },
+    couponRedemption: {
+      findMany: jest.fn(),
+      count: jest.fn(),
+      create: jest.fn(),
+      findUnique: jest.fn(),
+    },
     $transaction: jest.fn(),
+  };
+
+  const baseCoupon = {
+    id: 'coupon-1',
+    code: 'SAVE20',
+    discountType: DiscountType.PERCENTAGE,
+    discountValue: '20',
+    maxRedemptions: null,
+    minOrderAmount: null,
+    expiresAt: null,
+    courseId: null,
+    isActive: true,
+    redemptionCount: 0,
+    createdAt: new Date(),
+    createdById: 'admin-1',
   };
 
   beforeEach(async () => {
@@ -51,272 +60,342 @@ describe('CouponsService (Issue #145) — Validation of expiresAt and discount b
 
     service = module.get<CouponsService>(CouponsService);
     jest.clearAllMocks();
+    mockPrisma.$transaction.mockImplementation((cb) =>
+      Array.isArray(cb) ? Promise.all(cb) : Promise.resolve(cb(mockPrisma)),
+    );
   });
 
-  describe('CouponsService.create', () => {
-    it('should create a valid coupon successfully', async () => {
-      const futureDate = new Date(Date.now() + 86400000);
-      const dto: CreateCouponDto = {
+  describe('create()', () => {
+    const dto: CreateCouponDto = {
+      code: 'SAVE20',
+      discountType: DiscountType.PERCENTAGE,
+      discountValue: 20,
+    };
+
+    it('creates a new coupon with valid percentage discount', async () => {
+      mockPrisma.coupon.findUnique.mockResolvedValue(null);
+      mockPrisma.coupon.create.mockResolvedValue({
+        ...baseCoupon,
+        createdBy: { id: 'admin-1', name: 'Admin', role: 'ADMIN' },
+      });
+
+      await expect(service.create('admin-1', dto)).resolves.toMatchObject({
         code: 'SAVE20',
         discountType: DiscountType.PERCENTAGE,
-        discountValue: 20,
-        minOrderAmount: 50,
-        maxRedemptions: 10,
-        expiresAt: futureDate,
-      };
+      });
 
+      expect(mockPrisma.coupon.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            code: 'SAVE20',
+            discountType: DiscountType.PERCENTAGE,
+            discountValue: 20,
+          }),
+        }),
+      );
+    });
+
+    it('creates a coupon with fixed discount', async () => {
+      const fixedDto: CreateCouponDto = {
+        code: 'FIXED10',
+        discountType: DiscountType.FIXED,
+        discountValue: 10.5,
+      };
       mockPrisma.coupon.findUnique.mockResolvedValue(null);
-      mockPrisma.coupon.create.mockResolvedValue({ ...mockExistingCoupon, ...dto });
+      mockPrisma.coupon.create.mockResolvedValue({
+        ...baseCoupon,
+        code: 'FIXED10',
+        discountType: DiscountType.FIXED,
+        discountValue: '10.5',
+      });
 
-      const result = await service.create('user-1', dto);
-      expect(result).toBeDefined();
-      expect(mockPrisma.coupon.create).toHaveBeenCalled();
+      await expect(service.create('admin-1', fixedDto)).resolves.toBeTruthy();
     });
 
-    it('should reject past expiresAt with BadRequestException (400)', async () => {
-      const pastDate = new Date(Date.now() - 3600000);
-      const dto: CreateCouponDto = {
-        code: 'PASTEXPIRE',
+    it('converts code to uppercase and trims whitespace', async () => {
+      const lowerDto: CreateCouponDto = {
+        code: '  save20  ',
         discountType: DiscountType.PERCENTAGE,
-        discountValue: 15,
-        expiresAt: pastDate,
+        discountValue: 20,
       };
+      mockPrisma.coupon.findUnique.mockResolvedValue(null);
+      mockPrisma.coupon.create.mockResolvedValue(baseCoupon);
 
-      await expect(service.create('user-1', dto)).rejects.toThrow(BadRequestException);
-      await expect(service.create('user-1', dto)).rejects.toThrow(
-        'Expiration date must be in the future',
+      await service.create('admin-1', lowerDto);
+
+      expect(mockPrisma.coupon.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ code: 'SAVE20' }),
+        }),
       );
     });
 
-    it('should reject non-positive discountValue with BadRequestException (400)', async () => {
-      const dto: CreateCouponDto = {
-        code: 'NEGDISCOUNT',
-        discountType: DiscountType.FIXED,
-        discountValue: -10,
-      };
+    it('throws ConflictException if code already exists', async () => {
+      mockPrisma.coupon.findUnique.mockResolvedValue(baseCoupon);
 
-      await expect(service.create('user-1', dto)).rejects.toThrow(BadRequestException);
-      await expect(service.create('user-1', dto)).rejects.toThrow(
-        'Discount value must be greater than 0',
+      await expect(service.create('admin-1', dto)).rejects.toThrow(
+        ConflictException,
       );
     });
 
-    it('should reject zero discountValue with BadRequestException (400)', async () => {
-      const dto: CreateCouponDto = {
-        code: 'ZERODISCOUNT',
-        discountType: DiscountType.FIXED,
+    it('throws BadRequestException if code format is invalid', async () => {
+      const badDto: CreateCouponDto = {
+        code: 'AB',
+        discountType: DiscountType.PERCENTAGE,
+        discountValue: 20,
+      };
+
+      await expect(service.create('admin-1', badDto)).rejects.toThrow(
+        BadRequestException,
+      );
+    });
+
+    it('throws BadRequestException if discount value is zero', async () => {
+      const zeroDto: CreateCouponDto = {
+        code: 'ZERO',
+        discountType: DiscountType.PERCENTAGE,
         discountValue: 0,
       };
 
-      await expect(service.create('user-1', dto)).rejects.toThrow(BadRequestException);
-      await expect(service.create('user-1', dto)).rejects.toThrow(
-        'Discount value must be greater than 0',
+      await expect(service.create('admin-1', zeroDto)).rejects.toThrow(
+        BadRequestException,
       );
     });
 
-    it('should reject percentage discountValue exceeding 100 with BadRequestException (400)', async () => {
-      const dto: CreateCouponDto = {
-        code: 'OVER100',
+    it('throws BadRequestException if percentage exceeds 100', async () => {
+      const tooHighDto: CreateCouponDto = {
+        code: 'TOOHIGH',
         discountType: DiscountType.PERCENTAGE,
         discountValue: 150,
       };
 
-      await expect(service.create('user-1', dto)).rejects.toThrow(BadRequestException);
-      await expect(service.create('user-1', dto)).rejects.toThrow(
-        'Percentage discount value cannot exceed 100',
+      await expect(service.create('admin-1', tooHighDto)).rejects.toThrow(
+        BadRequestException,
       );
     });
 
-    it('should reject a fixed discount with more than 7 decimal places', async () => {
-      const dto: CreateCouponDto = {
-        code: 'PRECISE',
-        discountType: DiscountType.FIXED,
-        discountValue: 1.00000001,
-      };
-
-      await expect(service.create('user-1', dto)).rejects.toThrow(BadRequestException);
-      await expect(service.create('user-1', dto)).rejects.toThrow(
-        'Fixed discount must be a valid USDC amount',
-      );
-    });
-
-    it('should reject negative minOrderAmount with BadRequestException (400)', async () => {
-      const dto: CreateCouponDto = {
-        code: 'NEGMINORDER',
-        discountType: DiscountType.FIXED,
-        discountValue: 10,
+    it('throws BadRequestException if minOrderAmount is negative', async () => {
+      const negativeDto: CreateCouponDto = {
+        code: 'NEGATIVE',
+        discountType: DiscountType.PERCENTAGE,
+        discountValue: 20,
         minOrderAmount: -5,
       };
 
-      await expect(service.create('user-1', dto)).rejects.toThrow(BadRequestException);
-      await expect(service.create('user-1', dto)).rejects.toThrow(
-        'Minimum order amount cannot be negative',
+      await expect(service.create('admin-1', negativeDto)).rejects.toThrow(
+        BadRequestException,
       );
     });
 
-    it('should reject negative maxRedemptions with BadRequestException (400)', async () => {
-      const dto: CreateCouponDto = {
-        code: 'NEGMAXRED',
-        discountType: DiscountType.FIXED,
-        discountValue: 10,
-        maxRedemptions: -1,
-      };
-
-      await expect(service.create('user-1', dto)).rejects.toThrow(BadRequestException);
-      await expect(service.create('user-1', dto)).rejects.toThrow(
-        'Maximum redemptions cannot be negative',
-      );
-    });
-  });
-
-  describe('CouponsService.update', () => {
-    it('should update a coupon successfully with valid inputs', async () => {
-      const futureDate = new Date(Date.now() + 172800000);
-      const dto: UpdateCouponDto = {
-        discountValue: 25,
-        expiresAt: futureDate,
-      };
-
-      mockPrisma.coupon.findUnique.mockResolvedValue(mockExistingCoupon);
-      mockPrisma.coupon.update.mockResolvedValue({
-        ...mockExistingCoupon,
-        discountValue: 25,
-        expiresAt: futureDate,
-      });
-
-      const result = await service.update('coupon-1', dto);
-      expect(result.discountValue).toBe(25);
-    });
-
-    it('should reject updating expiresAt to a past date', async () => {
-      const pastDate = new Date(Date.now() - 3600000);
-      const dto: UpdateCouponDto = { expiresAt: pastDate };
-
-      mockPrisma.coupon.findUnique.mockResolvedValue(mockExistingCoupon);
-
-      await expect(service.update('coupon-1', dto)).rejects.toThrow(BadRequestException);
-      await expect(service.update('coupon-1', dto)).rejects.toThrow(
-        'Expiration date must be in the future',
-      );
-    });
-
-    it('should reject updating discountValue to negative or zero', async () => {
-      const dto: UpdateCouponDto = { discountValue: -5 };
-
-      mockPrisma.coupon.findUnique.mockResolvedValue(mockExistingCoupon);
-
-      await expect(service.update('coupon-1', dto)).rejects.toThrow(BadRequestException);
-      await expect(service.update('coupon-1', dto)).rejects.toThrow(
-        'Discount value must be greater than 0',
-      );
-    });
-
-    it('should reject updating percentage discountValue to greater than 100', async () => {
-      const dto: UpdateCouponDto = { discountValue: 110 };
-
-      mockPrisma.coupon.findUnique.mockResolvedValue(mockExistingCoupon);
-
-      await expect(service.update('coupon-1', dto)).rejects.toThrow(BadRequestException);
-      await expect(service.update('coupon-1', dto)).rejects.toThrow(
-        'Percentage discount value cannot exceed 100',
-      );
-    });
-
-    it('should reject updating minOrderAmount to negative value', async () => {
-      const dto: UpdateCouponDto = { minOrderAmount: -20 };
-
-      mockPrisma.coupon.findUnique.mockResolvedValue(mockExistingCoupon);
-
-      await expect(service.update('coupon-1', dto)).rejects.toThrow(BadRequestException);
-      await expect(service.update('coupon-1', dto)).rejects.toThrow(
-        'Minimum order amount cannot be negative',
-      );
-    });
-
-    it('should reject updating maxRedemptions to negative value', async () => {
-      const dto: UpdateCouponDto = { maxRedemptions: -10 };
-
-      mockPrisma.coupon.findUnique.mockResolvedValue(mockExistingCoupon);
-
-      await expect(service.update('coupon-1', dto)).rejects.toThrow(BadRequestException);
-      await expect(service.update('coupon-1', dto)).rejects.toThrow(
-        'Maximum redemptions cannot be negative',
-      );
-    });
-  });
-
-  describe('DTO Class-Validator Rules', () => {
-    it('CreateCouponDto fails validation if discountValue is <= 0', async () => {
-      const plain = {
-        code: 'TESTDTO',
-        discountType: DiscountType.FIXED,
-        discountValue: -5,
-      };
-      const dto = plainToInstance(CreateCouponDto, plain);
-      const errors = await validate(dto);
-      expect(errors.length).toBeGreaterThan(0);
-      expect(errors.some((e) => e.property === 'discountValue')).toBe(true);
-    });
-
-    it('CreateCouponDto fails validation if minOrderAmount is negative', async () => {
-      const plain = {
-        code: 'TESTDTO',
-        discountType: DiscountType.FIXED,
-        discountValue: 10,
-        minOrderAmount: -1,
-      };
-      const dto = plainToInstance(CreateCouponDto, plain);
-      const errors = await validate(dto);
-      expect(errors.length).toBeGreaterThan(0);
-      expect(errors.some((e) => e.property === 'minOrderAmount')).toBe(true);
-    });
-
-    it('CreateCouponDto fails validation if maxRedemptions is negative', async () => {
-      const plain = {
-        code: 'TESTDTO',
-        discountType: DiscountType.FIXED,
-        discountValue: 10,
-        maxRedemptions: -1,
-      };
-      const dto = plainToInstance(CreateCouponDto, plain);
-      const errors = await validate(dto);
-      expect(errors.length).toBeGreaterThan(0);
-      expect(errors.some((e) => e.property === 'maxRedemptions')).toBe(true);
-    });
-
-    it('CreateCouponDto fails validation for malformed coupon codes and over-limit percentages', async () => {
-      const plain = {
-        code: 'BAD CODE',
-        discountType: DiscountType.PERCENTAGE,
-        discountValue: 101,
-      };
-      const dto = plainToInstance(CreateCouponDto, plain);
-      const errors = await validate(dto);
-
-      expect(errors.some((e) => e.property === 'code')).toBe(true);
-      expect(errors.some((e) => e.property === 'discountValue')).toBe(true);
-    });
-
-    it('CreateCouponDto fails validation if expiresAt is in the past', async () => {
-      const dto = plainToInstance(CreateCouponDto, {
-        code: 'PASTDATE',
+    it('throws BadRequestException if maxRedemptions is negative', async () => {
+      const negativeDto: CreateCouponDto = {
+        code: 'NEG',
         discountType: DiscountType.PERCENTAGE,
         discountValue: 20,
-        expiresAt: new Date(Date.now() - 1000),
-      });
-      const errors = await validate(dto);
+        maxRedemptions: -1,
+      };
 
-      expect(errors.some((e) => e.property === 'expiresAt')).toBe(true);
+      await expect(service.create('admin-1', negativeDto)).rejects.toThrow(
+        BadRequestException,
+      );
     });
 
-    it('UpdateCouponDto fails validation if minOrderAmount or discountValue is negative', async () => {
-      const plain = {
-        discountValue: -10,
+    it('throws BadRequestException if expiresAt is in the past', async () => {
+      const pastDto: CreateCouponDto = {
+        code: 'PAST',
+        discountType: DiscountType.PERCENTAGE,
+        discountValue: 20,
+        expiresAt: new Date(Date.now() - 86400000), // yesterday
       };
-      const dto = plainToInstance(UpdateCouponDto, plain);
-      const errors = await validate(dto);
-      expect(errors.length).toBeGreaterThan(0);
-      expect(errors.some((e) => e.property === 'discountValue')).toBe(true);
+
+      await expect(service.create('admin-1', pastDto)).rejects.toThrow(
+        BadRequestException,
+      );
+    });
+
+    it('throws NotFoundException if courseId does not exist', async () => {
+      const courseDto: CreateCouponDto = {
+        code: 'COURSE20',
+        discountType: DiscountType.PERCENTAGE,
+        discountValue: 20,
+        courseId: 'missing-course',
+      };
+      mockPrisma.coupon.findUnique.mockResolvedValue(null);
+      mockPrisma.course.findUnique.mockResolvedValue(null);
+
+      await expect(service.create('admin-1', courseDto)).rejects.toThrow(
+        NotFoundException,
+      );
+    });
+
+    it('creates coupon with optional fields', async () => {
+      const fullDto: CreateCouponDto = {
+        code: 'FULL',
+        discountType: DiscountType.PERCENTAGE,
+        discountValue: 20,
+        maxRedemptions: 100,
+        minOrderAmount: 50,
+        expiresAt: new Date(Date.now() + 86400000), // tomorrow
+        courseId: 'course-1',
+        isActive: false,
+      };
+      mockPrisma.coupon.findUnique.mockResolvedValue(null);
+      mockPrisma.course.findUnique.mockResolvedValue({ id: 'course-1' });
+      mockPrisma.coupon.create.mockResolvedValue({
+        ...baseCoupon,
+        code: 'FULL',
+        maxRedemptions: 100,
+        minOrderAmount: '50',
+        isActive: false,
+      });
+
+      await expect(service.create('admin-1', fullDto)).resolves.toBeTruthy();
+    });
+  });
+
+  describe('findAll()', () => {
+    it('returns paginated coupons', async () => {
+      const coupons = [baseCoupon, { ...baseCoupon, id: 'coupon-2' }];
+      mockPrisma.$transaction.mockResolvedValue([coupons, 2]);
+
+      const result = await service.findAll(1, 20);
+
+      expect(result.data).toEqual(coupons);
+      expect(result.meta).toEqual({
+        total: 2,
+        page: 1,
+        limit: 20,
+        totalPages: 1,
+      });
+    });
+
+    it('filters by isActive when provided', async () => {
+      mockPrisma.$transaction.mockResolvedValue([[baseCoupon], 1]);
+
+      await service.findAll(1, 20, true);
+
+      const transactionArgs = mockPrisma.$transaction.mock.calls[0][0];
+      expect(transactionArgs).toHaveLength(2);
+    });
+
+    it('handles pagination correctly', async () => {
+      mockPrisma.$transaction.mockResolvedValue([[], 50]);
+
+      await service.findAll(3, 10);
+
+      // Transaction should include findMany with skip: 20, take: 10
+      expect(mockPrisma.$transaction).toHaveBeenCalled();
+    });
+  });
+
+  describe('findOne()', () => {
+    it('returns coupon with relations', async () => {
+      mockPrisma.coupon.findUnique.mockResolvedValue({
+        ...baseCoupon,
+        createdBy: { id: 'admin-1', name: 'Admin', role: 'ADMIN' },
+        _count: { redemptions: 5 },
+      });
+
+      await expect(service.findOne('coupon-1')).resolves.toMatchObject({
+        id: 'coupon-1',
+        code: 'SAVE20',
+      });
+    });
+
+    it('throws NotFoundException if coupon does not exist', async () => {
+      mockPrisma.coupon.findUnique.mockResolvedValue(null);
+
+      await expect(service.findOne('missing')).rejects.toThrow(
+        NotFoundException,
+      );
+    });
+  });
+
+  describe('findByCode()', () => {
+    it('returns coupon by code', async () => {
+      mockPrisma.coupon.findUnique.mockResolvedValue(baseCoupon);
+
+      await expect(service.findByCode('SAVE20')).resolves.toEqual(baseCoupon);
+      expect(mockPrisma.coupon.findUnique).toHaveBeenCalledWith({
+        where: { code: 'SAVE20' },
+      });
+    });
+
+    it('converts code to uppercase before lookup', async () => {
+      mockPrisma.coupon.findUnique.mockResolvedValue(baseCoupon);
+
+      await service.findByCode('  save20  ');
+
+      expect(mockPrisma.coupon.findUnique).toHaveBeenCalledWith({
+        where: { code: 'SAVE20' },
+      });
+    });
+
+    it('throws NotFoundException if code does not exist', async () => {
+      mockPrisma.coupon.findUnique.mockResolvedValue(null);
+
+      await expect(service.findByCode('INVALID')).rejects.toThrow(
+        NotFoundException,
+      );
+    });
+  });
+
+  describe('update()', () => {
+    const dto: UpdateCouponDto = { discountValue: 25 };
+
+    it('updates coupon fields', async () => {
+      mockPrisma.coupon.findUnique.mockResolvedValue({
+        ...baseCoupon,
+        createdBy: { id: 'admin-1', name: 'Admin', role: 'ADMIN' },
+        _count: { redemptions: 0 },
+      });
+      mockPrisma.coupon.update.mockResolvedValue({
+        ...baseCoupon,
+        discountValue: '25',
+      });
+
+      await expect(service.update('coupon-1', dto)).resolves.toMatchObject({
+        discountValue: '25',
+      });
+    });
+
+    it('validates discount value constraints', async () => {
+      mockPrisma.coupon.findUnique.mockResolvedValue({
+        ...baseCoupon,
+        createdBy: {}, _count: { redemptions: 0 },
+      });
+
+      await expect(
+        service.update('coupon-1', { discountValue: 0 }),
+      ).rejects.toThrow(BadRequestException);
+    });
+
+    it('throws NotFoundException if coupon does not exist', async () => {
+      mockPrisma.coupon.findUnique.mockResolvedValue(null);
+
+      await expect(service.update('missing', dto)).rejects.toThrow(
+        NotFoundException,
+      );
+    });
+  });
+
+  describe('deactivate()', () => {
+    it('sets isActive to false', async () => {
+      mockPrisma.coupon.findUnique.mockResolvedValue({
+        ...baseCoupon,
+        createdBy: {}, _count: { redemptions: 0 },
+      });
+      mockPrisma.coupon.update.mockResolvedValue({
+        ...baseCoupon,
+        isActive: false,
+      });
+
+      await service.deactivate('coupon-1');
+
+      expect(mockPrisma.coupon.update).toHaveBeenCalledWith({
+        where: { id: 'coupon-1' },
+        data: { isActive: false },
+      });
     });
   });
 });

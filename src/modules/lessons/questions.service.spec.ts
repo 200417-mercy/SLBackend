@@ -1,8 +1,13 @@
+import {
+  NotFoundException,
+  ForbiddenException,
+} from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
-import { QuestionsService } from './questions.service';
-import { PrismaService } from '../../common/prisma/prisma.service';
-import { ForbiddenException, NotFoundException } from '@nestjs/common';
 import { UserRole } from '@prisma/client';
+import { PrismaService } from '../../common/prisma/prisma.service';
+import { QuestionsService } from './questions.service';
+import { CreateQuestionDto } from './dto/create-question.dto';
+import { CreateAnswerDto } from './dto/create-answer.dto';
 
 describe('QuestionsService', () => {
   let service: QuestionsService;
@@ -12,16 +17,16 @@ describe('QuestionsService', () => {
       findUnique: jest.fn(),
     },
     question: {
-      findUnique: jest.fn(),
+      create: jest.fn(),
       findMany: jest.fn(),
       count: jest.fn(),
-      create: jest.fn(),
+      findUnique: jest.fn(),
     },
     answer: {
-      findUnique: jest.fn(),
       create: jest.fn(),
-      update: jest.fn(),
+      findUnique: jest.fn(),
       updateMany: jest.fn(),
+      update: jest.fn(),
     },
     enrollment: {
       findUnique: jest.fn(),
@@ -29,20 +34,38 @@ describe('QuestionsService', () => {
     $transaction: jest.fn(),
   };
 
-  const mockLesson = {
+  const baseLesson = {
     id: 'lesson-1',
-    title: 'Intro Lesson',
+    title: 'Introduction',
     isFree: false,
     module: {
-      id: 'module-1',
-      courseId: 'course-1',
       course: {
         id: 'course-1',
-        title: 'Master Course',
+        instructorAddress: 'instructor-addr',
         instructor: { id: 'instructor-1' },
-        instructorAddress: 'GINSTR',
       },
     },
+  };
+
+  const baseQuestion = {
+    id: 'question-1',
+    lessonId: 'lesson-1',
+    authorId: 'student-1',
+    title: 'How does this work?',
+    content: 'Can someone explain this concept?',
+    createdAt: new Date(),
+    author: { id: 'student-1', name: 'Student', avatarUrl: null },
+  };
+
+  const baseAnswer = {
+    id: 'answer-1',
+    questionId: 'question-1',
+    authorId: 'student-2',
+    content: 'Here is the explanation...',
+    isBestAnswer: false,
+    createdAt: new Date(),
+    author: { id: 'student-2', name: 'Helper', avatarUrl: null },
+    question: baseQuestion,
   };
 
   beforeEach(async () => {
@@ -55,111 +78,91 @@ describe('QuestionsService', () => {
 
     service = module.get<QuestionsService>(QuestionsService);
     jest.clearAllMocks();
+    mockPrisma.$transaction.mockImplementation((cb) =>
+      Promise.resolve(cb(mockPrisma)),
+    );
   });
 
-  describe('createQuestion', () => {
-    const dto = {
+  describe('createQuestion()', () => {
+    const dto: CreateQuestionDto = {
       title: 'How does this work?',
-      content: 'I need some help understanding step 2.',
+      content: 'Can someone explain this concept?',
     };
 
-    it('allows an enrolled student to ask a question', async () => {
-      mockPrisma.lesson.findUnique.mockResolvedValue(mockLesson);
-      mockPrisma.enrollment.findUnique.mockResolvedValue({ id: 'enroll-1' });
-      mockPrisma.question.create.mockResolvedValue({
-        id: 'q-1',
-        lessonId: 'lesson-1',
-        authorId: 'student-1',
-        ...dto,
+    it('allows enrolled student to ask a question', async () => {
+      mockPrisma.lesson.findUnique.mockResolvedValue(baseLesson);
+      mockPrisma.enrollment.findUnique.mockResolvedValue({
+        studentId: 'student-1',
+        courseId: 'course-1',
       });
+      mockPrisma.question.create.mockResolvedValue(baseQuestion);
 
-      const result = await service.createQuestion(
-        'lesson-1',
-        'student-1',
-        UserRole.STUDENT,
-        dto,
-      );
+      await expect(
+        service.createQuestion('lesson-1', 'student-1', UserRole.STUDENT, dto),
+      ).resolves.toEqual(baseQuestion);
 
-      expect(result.id).toBe('q-1');
-      expect(mockPrisma.question.create).toHaveBeenCalledWith(
-        expect.objectContaining({
-          data: expect.objectContaining({
-            lessonId: 'lesson-1',
-            authorId: 'student-1',
-            title: dto.title,
-            content: dto.content,
-          }),
-        }),
-      );
+      expect(mockPrisma.question.create).toHaveBeenCalledWith({
+        data: {
+          lessonId: 'lesson-1',
+          authorId: 'student-1',
+          title: dto.title,
+          content: dto.content,
+        },
+        include: {
+          author: { select: { id: true, name: true, avatarUrl: true } },
+        },
+      });
     });
 
-    it('allows the course instructor to ask a question without enrollment check', async () => {
-      mockPrisma.lesson.findUnique.mockResolvedValue(mockLesson);
-      mockPrisma.question.create.mockResolvedValue({
-        id: 'q-1',
-        lessonId: 'lesson-1',
-        authorId: 'instructor-1',
-        ...dto,
-      });
+    it('allows course instructor to ask a question', async () => {
+      mockPrisma.lesson.findUnique.mockResolvedValue(baseLesson);
+      mockPrisma.question.create.mockResolvedValue(baseQuestion);
 
-      const result = await service.createQuestion(
-        'lesson-1',
-        'instructor-1',
-        UserRole.INSTRUCTOR,
-        dto,
-      );
+      await expect(
+        service.createQuestion(
+          'lesson-1',
+          'instructor-1',
+          UserRole.INSTRUCTOR,
+          dto,
+        ),
+      ).resolves.toEqual(baseQuestion);
 
-      expect(result.id).toBe('q-1');
       expect(mockPrisma.enrollment.findUnique).not.toHaveBeenCalled();
     });
 
-    it('allows an admin to ask a question without enrollment check', async () => {
-      mockPrisma.lesson.findUnique.mockResolvedValue(mockLesson);
-      mockPrisma.question.create.mockResolvedValue({
-        id: 'q-1',
-        lessonId: 'lesson-1',
-        authorId: 'admin-1',
-        ...dto,
-      });
+    it('allows admin to ask a question', async () => {
+      mockPrisma.lesson.findUnique.mockResolvedValue(baseLesson);
+      mockPrisma.question.create.mockResolvedValue(baseQuestion);
 
-      const result = await service.createQuestion(
-        'lesson-1',
-        'admin-1',
-        UserRole.ADMIN,
-        dto,
-      );
+      await expect(
+        service.createQuestion('lesson-1', 'admin-1', UserRole.ADMIN, dto),
+      ).resolves.toEqual(baseQuestion);
 
-      expect(result.id).toBe('q-1');
       expect(mockPrisma.enrollment.findUnique).not.toHaveBeenCalled();
     });
 
-    it('allows questions on free preview lessons even if not enrolled', async () => {
-      mockPrisma.lesson.findUnique.mockResolvedValue({
-        ...mockLesson,
-        isFree: true,
-      });
+    it('allows anyone to ask on a free lesson', async () => {
+      const freeLesson = { ...baseLesson, isFree: true };
+      mockPrisma.lesson.findUnique.mockResolvedValue(freeLesson);
       mockPrisma.enrollment.findUnique.mockResolvedValue(null);
-      mockPrisma.question.create.mockResolvedValue({
-        id: 'q-1',
-        ...dto,
-      });
+      mockPrisma.question.create.mockResolvedValue(baseQuestion);
 
-      const result = await service.createQuestion(
-        'lesson-1',
-        'student-anon',
-        UserRole.STUDENT,
-        dto,
-      );
-
-      expect(result.id).toBe('q-1');
+      await expect(
+        service.createQuestion(
+          'lesson-1',
+          'unenrolled-user',
+          UserRole.STUDENT,
+          dto,
+        ),
+      ).resolves.toEqual(baseQuestion);
     });
 
-    it('throws ForbiddenException if non-enrolled user posts on paid lesson', async () => {
-      mockPrisma.lesson.findUnique.mockResolvedValue(mockLesson);
+    it('throws ForbiddenException if student not enrolled in paid lesson', async () => {
+      mockPrisma.lesson.findUnique.mockResolvedValue(baseLesson);
       mockPrisma.enrollment.findUnique.mockResolvedValue(null);
 
       await expect(
-        service.createQuestion('lesson-1', 'student-2', UserRole.STUDENT, dto),
+        service.createQuestion('lesson-1', 'student-99', UserRole.STUDENT, dto),
       ).rejects.toThrow(ForbiddenException);
     });
 
@@ -167,69 +170,131 @@ describe('QuestionsService', () => {
       mockPrisma.lesson.findUnique.mockResolvedValue(null);
 
       await expect(
-        service.createQuestion('missing-lesson', 'student-1', UserRole.STUDENT, dto),
+        service.createQuestion('missing', 'student-1', UserRole.STUDENT, dto),
       ).rejects.toThrow(NotFoundException);
     });
   });
 
-  describe('getQuestionsByLesson', () => {
-    it('returns paginated list of questions', async () => {
-      mockPrisma.lesson.findUnique.mockResolvedValue({ id: 'lesson-1' });
-      const questions = [
-        { id: 'q-1', title: 'Q1', answers: [] },
-        { id: 'q-2', title: 'Q2', answers: [] },
-      ];
+  describe('getQuestionsByLesson()', () => {
+    it('returns paginated questions with answers', async () => {
+      mockPrisma.lesson.findUnique.mockResolvedValue(baseLesson);
+      const questions = [baseQuestion, { ...baseQuestion, id: 'question-2' }];
       mockPrisma.$transaction.mockResolvedValue([questions, 2]);
 
-      const result = await service.getQuestionsByLesson('lesson-1', 1, 10);
-      expect(result.data).toHaveLength(2);
-      expect(result.meta.total).toBe(2);
-      expect(result.meta.totalPages).toBe(1);
+      const result = await service.getQuestionsByLesson('lesson-1', 1, 20);
+
+      expect(result.data).toEqual(questions);
+      expect(result.meta).toEqual({
+        total: 2,
+        page: 1,
+        limit: 20,
+        totalPages: 1,
+      });
     });
 
-    it('throws NotFoundException if lesson not found', async () => {
+    it('handles pagination correctly', async () => {
+      mockPrisma.lesson.findUnique.mockResolvedValue(baseLesson);
+      mockPrisma.$transaction.mockResolvedValue([[], 50]);
+
+      await service.getQuestionsByLesson('lesson-1', 3, 10);
+
+      // The transaction callback includes findMany with skip: 20, take: 10
+      expect(mockPrisma.$transaction).toHaveBeenCalled();
+    });
+
+    it('throws NotFoundException if lesson does not exist', async () => {
       mockPrisma.lesson.findUnique.mockResolvedValue(null);
 
       await expect(
-        service.getQuestionsByLesson('missing-lesson'),
+        service.getQuestionsByLesson('missing'),
       ).rejects.toThrow(NotFoundException);
     });
   });
 
-  describe('createAnswer', () => {
-    const dto = { content: 'Here is the solution to your question.' };
-    const mockQuestion = {
-      id: 'q-1',
-      authorId: 'student-1',
-      lesson: mockLesson,
+  describe('createAnswer()', () => {
+    const dto: CreateAnswerDto = { content: 'Here is the explanation...' };
+
+    const questionWithLesson = {
+      ...baseQuestion,
+      lesson: baseLesson,
     };
 
-    it('allows an enrolled student to answer a question', async () => {
-      mockPrisma.question.findUnique.mockResolvedValue(mockQuestion);
-      mockPrisma.enrollment.findUnique.mockResolvedValue({ id: 'enroll-2' });
-      mockPrisma.answer.create.mockResolvedValue({
-        id: 'ans-1',
-        questionId: 'q-1',
-        authorId: 'student-2',
-        ...dto,
+    it('allows enrolled student to answer', async () => {
+      mockPrisma.question.findUnique.mockResolvedValue(questionWithLesson);
+      mockPrisma.enrollment.findUnique.mockResolvedValue({
+        studentId: 'student-2',
+        courseId: 'course-1',
       });
+      mockPrisma.answer.create.mockResolvedValue(baseAnswer);
 
-      const result = await service.createAnswer(
-        'q-1',
-        'student-2',
-        UserRole.STUDENT,
-        dto,
-      );
+      await expect(
+        service.createAnswer(
+          'question-1',
+          'student-2',
+          UserRole.STUDENT,
+          dto,
+        ),
+      ).resolves.toEqual(baseAnswer);
 
-      expect(result.id).toBe('ans-1');
+      expect(mockPrisma.answer.create).toHaveBeenCalledWith({
+        data: {
+          questionId: 'question-1',
+          authorId: 'student-2',
+          content: dto.content,
+        },
+        include: {
+          author: { select: { id: true, name: true, avatarUrl: true } },
+        },
+      });
     });
 
-    it('throws ForbiddenException if non-enrolled user answers on paid lesson', async () => {
-      mockPrisma.question.findUnique.mockResolvedValue(mockQuestion);
+    it('allows course instructor to answer', async () => {
+      mockPrisma.question.findUnique.mockResolvedValue(questionWithLesson);
+      mockPrisma.answer.create.mockResolvedValue(baseAnswer);
+
+      await expect(
+        service.createAnswer(
+          'question-1',
+          'instructor-1',
+          UserRole.INSTRUCTOR,
+          dto,
+        ),
+      ).resolves.toEqual(baseAnswer);
+
+      expect(mockPrisma.enrollment.findUnique).not.toHaveBeenCalled();
+    });
+
+    it('allows admin to answer', async () => {
+      mockPrisma.question.findUnique.mockResolvedValue(questionWithLesson);
+      mockPrisma.answer.create.mockResolvedValue(baseAnswer);
+
+      await expect(
+        service.createAnswer('question-1', 'admin-1', UserRole.ADMIN, dto),
+      ).resolves.toEqual(baseAnswer);
+
+      expect(mockPrisma.enrollment.findUnique).not.toHaveBeenCalled();
+    });
+
+    it('allows anyone to answer on a free lesson', async () => {
+      const freeQuestionLesson = {
+        ...questionWithLesson,
+        lesson: { ...baseLesson, isFree: true },
+      };
+      mockPrisma.question.findUnique.mockResolvedValue(freeQuestionLesson);
+      mockPrisma.enrollment.findUnique.mockResolvedValue(null);
+      mockPrisma.answer.create.mockResolvedValue(baseAnswer);
+
+      await expect(
+        service.createAnswer('question-1', 'anyone', UserRole.STUDENT, dto),
+      ).resolves.toEqual(baseAnswer);
+    });
+
+    it('throws ForbiddenException if student not enrolled in paid lesson', async () => {
+      mockPrisma.question.findUnique.mockResolvedValue(questionWithLesson);
       mockPrisma.enrollment.findUnique.mockResolvedValue(null);
 
       await expect(
-        service.createAnswer('q-1', 'student-non-enrolled', UserRole.STUDENT, dto),
+        service.createAnswer('question-1', 'student-99', UserRole.STUDENT, dto),
       ).rejects.toThrow(ForbiddenException);
     });
 
@@ -237,68 +302,69 @@ describe('QuestionsService', () => {
       mockPrisma.question.findUnique.mockResolvedValue(null);
 
       await expect(
-        service.createAnswer('missing-q', 'student-1', UserRole.STUDENT, dto),
+        service.createAnswer('missing', 'student-1', UserRole.STUDENT, dto),
       ).rejects.toThrow(NotFoundException);
     });
   });
 
-  describe('markBestAnswer', () => {
-    const mockAnswer = {
-      id: 'ans-1',
-      questionId: 'q-1',
-      authorId: 'student-2',
-      isBestAnswer: false,
-      question: {
-        id: 'q-1',
-        authorId: 'author-1',
-      },
-    };
-
-    it('allows the question author to mark an answer as the best answer', async () => {
-      mockPrisma.answer.findUnique.mockResolvedValue(mockAnswer);
-      mockPrisma.$transaction.mockImplementation(async (cb) => {
-        const tx = {
-          answer: {
-            updateMany: jest.fn().mockResolvedValue({ count: 1 }),
-            update: jest.fn().mockResolvedValue({ ...mockAnswer, isBestAnswer: true }),
-          },
-        };
-        return cb(tx);
+  describe('markBestAnswer()', () => {
+    it('allows question author to mark best answer', async () => {
+      mockPrisma.answer.findUnique.mockResolvedValue(baseAnswer);
+      mockPrisma.answer.updateMany.mockResolvedValue({ count: 0 });
+      mockPrisma.answer.update.mockResolvedValue({
+        ...baseAnswer,
+        isBestAnswer: true,
       });
-
-      const result = await service.markBestAnswer('ans-1', 'author-1', UserRole.STUDENT);
-      expect(result.isBestAnswer).toBe(true);
-    });
-
-    it('allows an admin to mark an answer as the best answer', async () => {
-      mockPrisma.answer.findUnique.mockResolvedValue(mockAnswer);
-      mockPrisma.$transaction.mockImplementation(async (cb) => {
-        const tx = {
-          answer: {
-            updateMany: jest.fn().mockResolvedValue({ count: 1 }),
-            update: jest.fn().mockResolvedValue({ ...mockAnswer, isBestAnswer: true }),
-          },
-        };
-        return cb(tx);
-      });
-
-      const result = await service.markBestAnswer('ans-1', 'admin-user', UserRole.ADMIN);
-      expect(result.isBestAnswer).toBe(true);
-    });
-
-    it('throws ForbiddenException if a user other than author or admin tries to mark best answer', async () => {
-      mockPrisma.answer.findUnique.mockResolvedValue(mockAnswer);
 
       await expect(
-        service.markBestAnswer('ans-1', 'random-user', UserRole.STUDENT),
+        service.markBestAnswer('answer-1', 'student-1', UserRole.STUDENT),
+      ).resolves.toMatchObject({ id: 'answer-1', isBestAnswer: true });
+
+      expect(mockPrisma.$transaction).toHaveBeenCalled();
+    });
+
+    it('allows admin to mark best answer', async () => {
+      mockPrisma.answer.findUnique.mockResolvedValue(baseAnswer);
+      mockPrisma.answer.updateMany.mockResolvedValue({ count: 0 });
+      mockPrisma.answer.update.mockResolvedValue({
+        ...baseAnswer,
+        isBestAnswer: true,
+      });
+
+      await expect(
+        service.markBestAnswer('answer-1', 'admin-1', UserRole.ADMIN),
+      ).resolves.toMatchObject({ isBestAnswer: true });
+    });
+
+    it('unmarks previous best answer before marking new one', async () => {
+      mockPrisma.answer.findUnique.mockResolvedValue(baseAnswer);
+      mockPrisma.answer.updateMany.mockResolvedValue({ count: 1 });
+      mockPrisma.answer.update.mockResolvedValue({
+        ...baseAnswer,
+        isBestAnswer: true,
+      });
+
+      await service.markBestAnswer('answer-1', 'student-1', UserRole.STUDENT);
+
+      expect(mockPrisma.answer.updateMany).toHaveBeenCalledWith({
+        where: { questionId: 'question-1', isBestAnswer: true },
+        data: { isBestAnswer: false },
+      });
+    });
+
+    it('throws ForbiddenException if user is not question author or admin', async () => {
+      mockPrisma.answer.findUnique.mockResolvedValue(baseAnswer);
+
+      await expect(
+        service.markBestAnswer('answer-1', 'student-99', UserRole.STUDENT),
       ).rejects.toThrow(ForbiddenException);
     });
 
-    it('throws NotFoundException if answer not found', async () => {
+    it('throws NotFoundException if answer does not exist', async () => {
       mockPrisma.answer.findUnique.mockResolvedValue(null);
 
       await expect(
-        service.markBestAnswer('missing-ans', 'author-1', UserRole.STUDENT),
+        service.markBestAnswer('missing', 'student-1', UserRole.STUDENT),
       ).rejects.toThrow(NotFoundException);
     });
   });
