@@ -283,5 +283,23 @@ describe('RefreshTokenService', () => {
         data: { revokedAt: expect.any(Date) },
       });
     });
+
+    it('revokes the family when the signed token id does not match its stored record', async () => {
+      mockPrisma.refreshToken.findUnique.mockResolvedValue(activeRecord(1));
+      mockJwt.verify.mockReturnValue({
+        sub: user.id,
+        familyId: 'family-1',
+        generation: 1,
+        typ: 'refresh',
+        jti: 'different-token-id',
+      });
+
+      await expect(service.rotate('refresh-1')).rejects.toThrow('Refresh token reuse detected');
+      expect(mockPrisma.refreshToken.updateMany).toHaveBeenCalledWith({
+        where: { familyId: 'family-1', revokedAt: null },
+        data: { revokedAt: expect.any(Date) },
+      });
+      expect(mockPrisma.refreshToken.create).not.toHaveBeenCalled();
+    });
   });
 });

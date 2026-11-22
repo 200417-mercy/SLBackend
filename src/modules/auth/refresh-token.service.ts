@@ -130,7 +130,8 @@ export class RefreshTokenService {
     if (
       payload.familyId !== record.familyId ||
       payload.sub !== record.userId ||
-      payload.generation !== record.generation
+      payload.generation !== record.generation ||
+      payload.jti !== record.id
     ) {
       await this.revokeFamily(record.familyId);
       this.logger.warn(`Refresh token mismatch for family ${record.familyId}; family revoked`);
