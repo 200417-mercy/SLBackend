@@ -50,3 +50,10 @@ SorobanLard — NestJS backend for the online vocational skills learning platfor
 
 Changes accumulated since the last release. Run `npm run release` (standard-version) to
 cut a new semantic version, regenerate this changelog, and create a git tag.
+
+### Testing
+
+- Add unit tests for CoursesService covering course creation, approval, rejection, finding courses, and prerequisite cycle detection (#315)
+- Add unit tests for CourseAutosaveService covering autosave operations, version conflict detection, and draft recovery (#316)
+- Add unit tests for RecommendationsService covering co-enrollment based recommendations and category fallback logic (#317)
+- Add unit tests for SearchService (CourseSearchService) covering autocomplete, search term tracking, and ranking algorithms (#318)
